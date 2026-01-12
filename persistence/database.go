@@ -1,56 +1,43 @@
 package persistence
 
 import (
-	"database/sql"
+	"context"
 	"fmt"
+	"log"
 	"os"
 
-	_ "github.com/lib/pq"
-	"github.com/pressly/goose/v3"
+	"github.com/jackc/pgx/v5"
 )
 
-var DB *sql.DB
+var DB *pgx.Conn
 
-// InitDB initializes the database connection and runs migrations
+// InitDB matches the simple Supabase sample: open a pgx connection and log the server version.
 func InitDB() error {
 	databaseURL := os.Getenv("DATABASE_URL")
 	if databaseURL == "" {
 		return fmt.Errorf("DATABASE_URL environment variable is required")
 	}
 
-	var err error
-	DB, err = sql.Open("postgres", databaseURL)
+	conn, err := pgx.Connect(context.Background(), databaseURL)
 	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return fmt.Errorf("failed to connect to the database: %w", err)
+	}
+	DB = conn
+
+	// Example query to test connection
+	var version string
+	if err := DB.QueryRow(context.Background(), "SELECT version()").Scan(&version); err != nil {
+		return fmt.Errorf("query failed: %w", err)
 	}
 
-	// Test the connection
-	if err := DB.Ping(); err != nil {
-		return fmt.Errorf("failed to ping database: %w", err)
-	}
-
-	// Run migrations using goose
-	migrationsDir := "migrations"
-	if _, err := os.Stat(migrationsDir); os.IsNotExist(err) {
-		// Migrations directory doesn't exist, skip migrations
-		fmt.Println("Migrations directory not found, skipping migrations")
-	} else {
-		if err := goose.SetDialect("postgres"); err != nil {
-			return fmt.Errorf("failed to set goose dialect: %w", err)
-		}
-
-		if err := goose.Up(DB, migrationsDir); err != nil {
-			return fmt.Errorf("failed to run migrations: %w", err)
-		}
-	}
-
+	log.Printf("Connected to: %s\n", version)
 	return nil
 }
 
-// CloseDB closes the database connection
+// CloseDB closes the database connection.
 func CloseDB() error {
 	if DB != nil {
-		return DB.Close()
+		return DB.Close(context.Background())
 	}
 	return nil
 }

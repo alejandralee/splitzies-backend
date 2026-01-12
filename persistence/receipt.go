@@ -1,6 +1,7 @@
 package persistence
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/oklog/ulid/v2"
@@ -25,6 +26,7 @@ type ReceiptItem struct {
 
 // SaveReceipt saves a receipt with its items to the database
 func SaveReceipt(items []ReceiptItemDB) (*Receipt, error) {
+	ctx := context.Background()
 	if DB == nil {
 		return nil, fmt.Errorf("database not initialized")
 	}
@@ -33,34 +35,27 @@ func SaveReceipt(items []ReceiptItemDB) (*Receipt, error) {
 	receiptID := ulid.Make().String()
 
 	// Start a transaction
-	tx, err := DB.Begin()
+	tx, err := DB.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer tx.Rollback(ctx)
 
 	// Insert receipt with generated ULID
-	_, err = tx.Exec("INSERT INTO receipts (id, created_at) VALUES ($1, CURRENT_TIMESTAMP)", receiptID)
+	_, err = tx.Exec(ctx, "INSERT INTO receipts (id, created_at) VALUES ($1, CURRENT_TIMESTAMP)", receiptID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert receipt: %w", err)
 	}
-
-	// Insert receipt items
-	stmt, err := tx.Prepare(`
-		INSERT INTO receipt_items (id, receipt_id, name, quantity, total_price, price_per_item)
-		VALUES ($1, $2, $3, $4, $5, $6)
-	`)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare statement: %w", err)
-	}
-	defer stmt.Close()
 
 	dbItems := make([]ReceiptItem, 0, len(items))
 	for _, item := range items {
 		// Generate ULID for each item
 		itemID := ulid.Make().String()
-		
-		_, err := stmt.Exec(itemID, receiptID, item.Name, item.Quantity, item.TotalPrice, item.PricePerItem)
+
+		_, err := tx.Exec(ctx, `
+			INSERT INTO receipt_items (id, receipt_id, name, quantity, total_price, price_per_item)
+			VALUES ($1, $2, $3, $4, $5, $6)
+		`, itemID, receiptID, item.Name, item.Quantity, item.TotalPrice, item.PricePerItem)
 		if err != nil {
 			return nil, fmt.Errorf("failed to insert receipt item: %w", err)
 		}
@@ -76,13 +71,13 @@ func SaveReceipt(items []ReceiptItemDB) (*Receipt, error) {
 	}
 
 	// Commit transaction
-	if err := tx.Commit(); err != nil {
+	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	// Get receipt with created_at timestamp
 	var createdAt string
-	err = DB.QueryRow("SELECT created_at FROM receipts WHERE id = $1", receiptID).Scan(&createdAt)
+	err = DB.QueryRow(ctx, "SELECT created_at FROM receipts WHERE id = $1", receiptID).Scan(&createdAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipt timestamp: %w", err)
 	}
