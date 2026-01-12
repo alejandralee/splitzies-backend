@@ -14,3 +14,6 @@ CREATE TABLE IF NOT EXISTS receipt_items (
     FOREIGN KEY (receipt_id) REFERENCES receipts(id) ON DELETE CASCADE
 );
 
+-- +goose Down
+DROP TABLE IF EXISTS receipt_items;
+DROP TABLE IF EXISTS receipts;
