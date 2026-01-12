@@ -1,11 +1,13 @@
 package transport
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 
 	"splitzies/persistence"
+	"splitzies/storage"
 )
 
 // ReceiptItem represents a single item in a receipt
@@ -23,8 +25,9 @@ type AddReceiptRequest struct {
 
 // AddReceiptResponse represents the response after processing a receipt
 type AddReceiptResponse struct {
-	Message string        `json:"message"`
-	Items   []ReceiptItem `json:"items"`
+	Message  string        `json:"message"`
+	Items    []ReceiptItem `json:"items"`
+	ImageURL *string       `json:"image_url,omitempty"`
 }
 
 // convertReceiptItems converts request receipt items to persistence receipt items.
@@ -102,8 +105,8 @@ func AddReceiptHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Save receipt to database
-	savedReceipt, err := persistence.SaveReceipt(itemsToSave)
+	// Save receipt to database (no image for manual entry)
+	savedReceipt, err := persistence.SaveReceipt(itemsToSave, nil)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save receipt: %v", err), http.StatusInternalServerError)
 		return
@@ -113,6 +116,89 @@ func AddReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	response := AddReceiptResponse{
 		Message: fmt.Sprintf("Receipt added successfully with ID: %s", savedReceipt.ID),
 		Items:   req.Items,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+}
+
+// UploadReceiptImageHandler handles receipt image uploads
+// Expects multipart/form-data with:
+//   - "image": the receipt image file
+// Returns the uploaded image URL
+func UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
+	// Only allow POST method
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse multipart form (max 10MB)
+	err := r.ParseMultipartForm(10 << 20) // 10MB
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to parse multipart form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	// Get the image file from form
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get image file: %v", err), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	// Validate file size (max 10MB)
+	if header.Size > 10<<20 {
+		http.Error(w, "Image file too large (max 10MB)", http.StatusBadRequest)
+		return
+	}
+
+	// Validate content type
+	contentType := header.Header.Get("Content-Type")
+	if contentType != "" {
+		validTypes := map[string]bool{
+			"image/jpeg": true,
+			"image/jpg":  true,
+			"image/png":  true,
+			"image/gif":  true,
+			"image/webp": true,
+		}
+		if !validTypes[contentType] {
+			http.Error(w, fmt.Sprintf("Invalid image type: %s. Supported types: jpeg, jpg, png, gif, webp", contentType), http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Generate receipt ID first (we'll create a receipt record with just the image)
+	ctx := context.Background()
+	receiptID := persistence.GenerateReceiptID()
+
+	// Upload image to GCS
+	imageURL, err := storage.UploadReceiptImageFromReader(ctx, file, receiptID, contentType)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to upload image: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Create a receipt record with the image URL (no items yet)
+	// We'll save an empty receipt with just the image
+	itemsToSave := []persistence.ReceiptItemDB{}
+	savedReceipt, err := persistence.SaveReceipt(itemsToSave, &imageURL)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to save receipt: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Return success response
+	response := map[string]interface{}{
+		"message":   fmt.Sprintf("Receipt image uploaded successfully with ID: %s", savedReceipt.ID),
+		"receipt_id": savedReceipt.ID,
+		"image_url": imageURL,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

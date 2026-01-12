@@ -33,6 +33,7 @@ func main() {
 
 	http.HandleFunc("/", transport.HelloWorldHandler)
 	http.HandleFunc("/receipts", transport.AddReceiptHandler)
+	http.HandleFunc("/receipts/image", transport.UploadReceiptImageHandler)
 
 	fmt.Printf("Server starting on %s\n", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))

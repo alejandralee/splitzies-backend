@@ -11,6 +11,7 @@ import (
 type Receipt struct {
 	ID        string
 	CreatedAt string
+	ImageURL  *string
 	Items     []ReceiptItem
 }
 
@@ -25,7 +26,8 @@ type ReceiptItem struct {
 }
 
 // SaveReceipt saves a receipt with its items to the database
-func SaveReceipt(items []ReceiptItemDB) (*Receipt, error) {
+// imageURL is optional - pass nil if no image is provided
+func SaveReceipt(items []ReceiptItemDB, imageURL *string) (*Receipt, error) {
 	ctx := context.Background()
 	if DB == nil {
 		return nil, fmt.Errorf("database not initialized")
@@ -41,8 +43,8 @@ func SaveReceipt(items []ReceiptItemDB) (*Receipt, error) {
 	}
 	defer tx.Rollback(ctx)
 
-	// Insert receipt with generated ULID
-	_, err = tx.Exec(ctx, "INSERT INTO receipts (id, created_at) VALUES ($1, CURRENT_TIMESTAMP)", receiptID)
+	// Insert receipt with generated ULID and optional image URL
+	_, err = tx.Exec(ctx, "INSERT INTO receipts (id, created_at, image_url) VALUES ($1, CURRENT_TIMESTAMP, $2)", receiptID, imageURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert receipt: %w", err)
 	}
@@ -75,9 +77,10 @@ func SaveReceipt(items []ReceiptItemDB) (*Receipt, error) {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Get receipt with created_at timestamp
+	// Get receipt with created_at timestamp and image_url
 	var createdAt string
-	err = DB.QueryRow(ctx, "SELECT created_at FROM receipts WHERE id = $1", receiptID).Scan(&createdAt)
+	var dbImageURL *string
+	err = DB.QueryRow(ctx, "SELECT created_at, image_url FROM receipts WHERE id = $1", receiptID).Scan(&createdAt, &dbImageURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipt timestamp: %w", err)
 	}
@@ -85,6 +88,7 @@ func SaveReceipt(items []ReceiptItemDB) (*Receipt, error) {
 	receipt := &Receipt{
 		ID:        receiptID,
 		CreatedAt: createdAt,
+		ImageURL:  dbImageURL,
 		Items:     dbItems,
 	}
 
@@ -97,4 +101,9 @@ type ReceiptItemDB struct {
 	Quantity     int
 	TotalPrice   float64
 	PricePerItem float64
+}
+
+// GenerateReceiptID generates a new ULID for a receipt
+func GenerateReceiptID() string {
+	return ulid.Make().String()
 }
