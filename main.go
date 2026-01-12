@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 
 	"splitzies/persistence"
 	"splitzies/transport"
@@ -18,9 +19,16 @@ func main() {
 
 	fmt.Println("Database initialized successfully")
 
+	port := os.Getenv("PORT")
+	if port == "" {
+		// Default for local dev; Heroku provides PORT.
+		port = "8080"
+	}
+	addr := ":" + port
+
 	http.HandleFunc("/", transport.HelloWorldHandler)
 	http.HandleFunc("/receipts", transport.AddReceiptHandler)
 
-	fmt.Println("Server starting on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	fmt.Printf("Server starting on %s\n", addr)
+	log.Fatal(http.ListenAndServe(addr, nil))
 }
