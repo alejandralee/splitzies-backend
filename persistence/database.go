@@ -65,16 +65,33 @@ func RunMigrations(migrationsDir string) error {
 	sqlDB := stdlib.OpenDB(*config)
 	defer sqlDB.Close()
 
-	// Set the dialect for goose
-	if err := goose.SetDialect("postgres"); err != nil {
-		return fmt.Errorf("failed to set goose dialect: %w", err)
+	// Create filesystem from migrations directory
+	migrationsFS := os.DirFS(migrationsDir)
+
+	// Use the Provider API which properly handles .up.sql and .down.sql pairing
+	provider, err := goose.NewProvider(goose.DialectPostgres, sqlDB, migrationsFS)
+	if err != nil {
+		return fmt.Errorf("failed to create goose provider: %w", err)
 	}
 
-	// Run migrations
-	if err := goose.Up(sqlDB, migrationsDir); err != nil {
+	ctx := context.Background()
+
+	// Run migrations up
+	results, err := provider.Up(ctx)
+	if err != nil {
 		return fmt.Errorf("failed to run migrations: %w", err)
 	}
 
-	log.Println("Migrations completed successfully")
+	if len(results) > 0 {
+		log.Printf("Applied %d migration(s)", len(results))
+		for _, result := range results {
+			if result.Source != nil {
+				log.Printf("  - Migration %d: %s", result.Source.Version, result.Source.Path)
+			}
+		}
+	} else {
+		log.Println("No new migrations to apply")
+	}
+
 	return nil
 }
