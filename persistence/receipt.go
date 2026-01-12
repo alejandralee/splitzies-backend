@@ -2,6 +2,8 @@ package persistence
 
 import (
 	"context"
+	"database/sql/driver"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -13,7 +15,38 @@ type Receipt struct {
 	ID        string
 	CreatedAt time.Time
 	ImageURL  *string
+	OCRText   *OCRTextData
 	Items     []ReceiptItem
+}
+
+// OCRTextData represents the OCR text data stored as JSONB
+type OCRTextData struct {
+	Text string `json:"text"`
+}
+
+// Value implements driver.Valuer for JSONB storage
+func (o *OCRTextData) Value() (driver.Value, error) {
+	if o == nil {
+		return nil, nil
+	}
+	return json.Marshal(o)
+}
+
+// Scan implements sql.Scanner for JSONB retrieval
+func (o *OCRTextData) Scan(value interface{}) error {
+	if value == nil {
+		*o = OCRTextData{}
+		return nil
+	}
+	bytes, ok := value.([]byte)
+	if !ok {
+		return fmt.Errorf("cannot scan %T into OCRTextData", value)
+	}
+	if len(bytes) == 0 {
+		*o = OCRTextData{}
+		return nil
+	}
+	return json.Unmarshal(bytes, o)
 }
 
 // ReceiptItem represents a receipt item in the database
@@ -28,7 +61,8 @@ type ReceiptItem struct {
 
 // SaveReceipt saves a receipt with its items to the database
 // imageURL is optional - pass nil if no image is provided
-func SaveReceipt(items []ReceiptItemDB, imageURL *string) (*Receipt, error) {
+// ocrText is optional - pass nil if no OCR text is provided
+func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData) (*Receipt, error) {
 	ctx := context.Background()
 	if DB == nil {
 		return nil, fmt.Errorf("database not initialized")
@@ -44,8 +78,17 @@ func SaveReceipt(items []ReceiptItemDB, imageURL *string) (*Receipt, error) {
 	}
 	defer tx.Rollback(ctx)
 
-	// Insert receipt with generated ULID and optional image URL
-	_, err = tx.Exec(ctx, "INSERT INTO receipts (id, created_at, image_url) VALUES ($1, CURRENT_TIMESTAMP, $2)", receiptID, imageURL)
+	// Convert OCRTextData to JSONB
+	var ocrTextJSON []byte
+	if ocrText != nil {
+		ocrTextJSON, err = json.Marshal(ocrText)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal OCR text: %w", err)
+		}
+	}
+
+	// Insert receipt with generated ULID, optional image URL, and optional OCR text
+	_, err = tx.Exec(ctx, "INSERT INTO receipts (id, created_at, image_url, ocr_text) VALUES ($1, CURRENT_TIMESTAMP, $2, $3)", receiptID, imageURL, ocrTextJSON)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert receipt: %w", err)
 	}
@@ -78,18 +121,28 @@ func SaveReceipt(items []ReceiptItemDB, imageURL *string) (*Receipt, error) {
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Get receipt with created_at timestamp and image_url
+	// Get receipt with created_at timestamp, image_url, and ocr_text
 	var createdAt time.Time
 	var dbImageURL *string
-	err = DB.QueryRow(ctx, "SELECT created_at, image_url FROM receipts WHERE id = $1", receiptID).Scan(&createdAt, &dbImageURL)
+	var dbOCRTextJSON []byte
+	err = DB.QueryRow(ctx, "SELECT created_at, image_url, ocr_text FROM receipts WHERE id = $1", receiptID).Scan(&createdAt, &dbImageURL, &dbOCRTextJSON)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get receipt timestamp: %w", err)
+		return nil, fmt.Errorf("failed to get receipt data: %w", err)
+	}
+
+	var dbOCRText *OCRTextData
+	if len(dbOCRTextJSON) > 0 {
+		dbOCRText = &OCRTextData{}
+		if err := json.Unmarshal(dbOCRTextJSON, dbOCRText); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal OCR text: %w", err)
+		}
 	}
 
 	receipt := &Receipt{
 		ID:        receiptID,
 		CreatedAt: createdAt,
 		ImageURL:  dbImageURL,
+		OCRText:   dbOCRText,
 		Items:     dbItems,
 	}
 

@@ -1,9 +1,11 @@
 package transport
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 
 	"splitzies/persistence"
@@ -106,7 +108,7 @@ func AddReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save receipt to database (no image for manual entry)
-	savedReceipt, err := persistence.SaveReceipt(itemsToSave, nil)
+	savedReceipt, err := persistence.SaveReceipt(itemsToSave, nil, nil)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save receipt: %v", err), http.StatusInternalServerError)
 		return
@@ -129,6 +131,7 @@ func AddReceiptHandler(w http.ResponseWriter, r *http.Request) {
 // UploadReceiptImageHandler handles receipt image uploads
 // Expects multipart/form-data with:
 //   - "image": the receipt image file
+//
 // Returns the uploaded image URL
 func UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
 	// Only allow POST method
@@ -178,27 +181,85 @@ func UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := context.Background()
 	receiptID := persistence.GenerateReceiptID()
 
-	// Upload image to GCS
-	imageURL, err := storage.UploadReceiptImageFromReader(ctx, file, receiptID, contentType)
+	// Read file data for OCR (we need to read it before uploading)
+	// Reset file position after reading
+	fileData, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read image file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Upload image to GCS (using the data we just read)
+	imageURL, err := storage.UploadReceiptImageFromReader(ctx, bytes.NewReader(fileData), receiptID, contentType)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to upload image: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Create a receipt record with the image URL (no items yet)
-	// We'll save an empty receipt with just the image
-	itemsToSave := []persistence.ReceiptItemDB{}
-	savedReceipt, err := persistence.SaveReceipt(itemsToSave, &imageURL)
+	// Perform OCR on the image
+	ocrText, err := storage.PerformOCRFromBytes(ctx, fileData)
+	var parsedItems []persistence.ReceiptItemDB
+	var ocrTextData *persistence.OCRTextData
+
+	if err != nil {
+		// OCR failed - log but don't fail the request
+		// We'll save the receipt without OCR text
+		fmt.Printf("Warning: OCR failed: %v\n", err)
+	} else if ocrText != "" {
+		// Always save OCR text for reference
+		ocrTextData = &persistence.OCRTextData{
+			Text: ocrText,
+		}
+
+		// Try to parse receipt items from OCR text
+		parsedItemsRaw := storage.ExtractReceiptItemsFromText(ocrText)
+
+		if len(parsedItemsRaw) > 0 {
+			// Successfully parsed items - convert to ReceiptItemDB and save them
+			parsedItems = make([]persistence.ReceiptItemDB, len(parsedItemsRaw))
+			for i, item := range parsedItemsRaw {
+				parsedItems[i] = persistence.ReceiptItemDB{
+					Name:         item.Name,
+					Quantity:     item.Quantity,
+					TotalPrice:   item.TotalPrice,
+					PricePerItem: item.PricePerItem,
+				}
+			}
+		}
+		// If items couldn't be parsed, we still save the OCR text (already set above)
+	}
+
+	// Save receipt with image URL, parsed items (if any), and OCR text
+	savedReceipt, err := persistence.SaveReceipt(parsedItems, &imageURL, ocrTextData)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save receipt: %v", err), http.StatusInternalServerError)
 		return
 	}
 
+	// Convert parsed items to response format
+	responseItems := make([]ReceiptItem, len(parsedItems))
+	for i, item := range parsedItems {
+		totalPrice := item.TotalPrice
+		pricePerItem := item.PricePerItem
+		responseItems[i] = ReceiptItem{
+			Name:         item.Name,
+			Quantity:     item.Quantity,
+			TotalPrice:   &totalPrice,
+			PricePerItem: &pricePerItem,
+		}
+	}
+
 	// Return success response
 	response := map[string]interface{}{
-		"message":   fmt.Sprintf("Receipt image uploaded successfully with ID: %s", savedReceipt.ID),
+		"message":    fmt.Sprintf("Receipt image uploaded successfully with ID: %s", savedReceipt.ID),
 		"receipt_id": savedReceipt.ID,
-		"image_url": imageURL,
+		"image_url":  imageURL,
+		"items":      responseItems,
+	}
+
+	// Include OCR text in response when available (for reference/debugging)
+	if ocrTextData != nil {
+		response["ocr_text"] = ocrTextData.Text
 	}
 
 	w.Header().Set("Content-Type", "application/json")
