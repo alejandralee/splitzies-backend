@@ -17,6 +17,11 @@ func main() {
 	}
 	defer persistence.CloseDB()
 
+	// Run migrations
+	if err := persistence.RunMigrations("migrations"); err != nil {
+		log.Fatalf("Failed to run migrations: %v", err)
+	}
+
 	fmt.Println("Database initialized successfully")
 
 	port := os.Getenv("PORT")
