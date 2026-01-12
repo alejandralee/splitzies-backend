@@ -3,6 +3,7 @@ package persistence
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/oklog/ulid/v2"
 )
@@ -10,7 +11,7 @@ import (
 // Receipt represents a receipt in the database
 type Receipt struct {
 	ID        string
-	CreatedAt string
+	CreatedAt time.Time
 	ImageURL  *string
 	Items     []ReceiptItem
 }
@@ -78,7 +79,7 @@ func SaveReceipt(items []ReceiptItemDB, imageURL *string) (*Receipt, error) {
 	}
 
 	// Get receipt with created_at timestamp and image_url
-	var createdAt string
+	var createdAt time.Time
 	var dbImageURL *string
 	err = DB.QueryRow(ctx, "SELECT created_at, image_url FROM receipts WHERE id = $1", receiptID).Scan(&createdAt, &dbImageURL)
 	if err != nil {
