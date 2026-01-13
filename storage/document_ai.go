@@ -12,6 +12,7 @@ import (
 	documentai "cloud.google.com/go/documentai/apiv1"
 	documentaipb "cloud.google.com/go/documentai/apiv1/documentaipb"
 	"google.golang.org/api/option"
+	"google.golang.org/genproto/googleapis/type/money"
 )
 
 // DocumentAIReceipt captures the structured result from Document AI.
@@ -67,9 +68,11 @@ func ProcessReceiptWithDocumentAI(ctx context.Context, documentData []byte, mime
 	processorName := fmt.Sprintf("projects/%s/locations/%s/processors/%s", projectID, location, processorID)
 	req := &documentaipb.ProcessRequest{
 		Name: processorName,
-		RawDocument: &documentaipb.RawDocument{
-			Content:  documentData,
-			MimeType: mimeType,
+		Source: &documentaipb.ProcessRequest_RawDocument{
+			RawDocument: &documentaipb.RawDocument{
+				Content:  documentData,
+				MimeType: mimeType,
+			},
 		},
 	}
 
@@ -156,11 +159,11 @@ func moneyFromEntity(entity *documentaipb.Document_Entity) (float64, bool) {
 	return moneyFromText(entity.GetMentionText())
 }
 
-func moneyToFloat(money *documentaipb.Money) float64 {
-	if money == nil {
+func moneyToFloat(value *money.Money) float64 {
+	if value == nil {
 		return 0
 	}
-	return float64(money.Units) + float64(money.Nanos)/1e9
+	return float64(value.Units) + float64(value.Nanos)/1e9
 }
 
 func moneyFromText(text string) (float64, bool) {

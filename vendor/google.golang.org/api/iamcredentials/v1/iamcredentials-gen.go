@@ -1,4 +1,4 @@
-// Copyright 2024 Google LLC.
+// Copyright 2025 Google LLC.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -57,11 +57,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 
+	"github.com/googleapis/gax-go/v2/internallog"
 	googleapi "google.golang.org/api/googleapi"
 	internal "google.golang.org/api/internal"
 	gensupport "google.golang.org/api/internal/gensupport"
@@ -85,6 +87,7 @@ var _ = strings.Replace
 var _ = context.Canceled
 var _ = internaloption.WithDefaultEndpoint
 var _ = internal.Version
+var _ = internallog.New
 
 const apiId = "iamcredentials:v1"
 const apiName = "iamcredentials"
@@ -92,7 +95,6 @@ const apiVersion = "v1"
 const basePath = "https://iamcredentials.googleapis.com/"
 const basePathTemplate = "https://iamcredentials.UNIVERSE_DOMAIN/"
 const mtlsBasePath = "https://iamcredentials.mtls.googleapis.com/"
-const defaultUniverseDomain = "googleapis.com"
 
 // OAuth2 scopes used by this API.
 const (
@@ -111,15 +113,14 @@ func NewService(ctx context.Context, opts ...option.ClientOption) (*Service, err
 	opts = append(opts, internaloption.WithDefaultEndpoint(basePath))
 	opts = append(opts, internaloption.WithDefaultEndpointTemplate(basePathTemplate))
 	opts = append(opts, internaloption.WithDefaultMTLSEndpoint(mtlsBasePath))
-	opts = append(opts, internaloption.WithDefaultUniverseDomain(defaultUniverseDomain))
+	opts = append(opts, internaloption.EnableNewAuthLibrary())
 	client, endpoint, err := htransport.NewClient(ctx, opts...)
 	if err != nil {
 		return nil, err
 	}
-	s, err := New(client)
-	if err != nil {
-		return nil, err
-	}
+	s := &Service{client: client, BasePath: basePath, logger: internaloption.GetLogger(opts)}
+	s.Locations = NewLocationsService(s)
+	s.Projects = NewProjectsService(s)
 	if endpoint != "" {
 		s.BasePath = endpoint
 	}
@@ -135,15 +136,16 @@ func New(client *http.Client) (*Service, error) {
 	if client == nil {
 		return nil, errors.New("client is nil")
 	}
-	s := &Service{client: client, BasePath: basePath}
-	s.Projects = NewProjectsService(s)
-	return s, nil
+	return NewService(context.TODO(), option.WithHTTPClient(client))
 }
 
 type Service struct {
 	client    *http.Client
+	logger    *slog.Logger
 	BasePath  string // API endpoint base URL
 	UserAgent string // optional additional User-Agent fragment
+
+	Locations *LocationsService
 
 	Projects *ProjectsService
 }
@@ -155,8 +157,30 @@ func (s *Service) userAgent() string {
 	return googleapi.UserAgent + " " + s.UserAgent
 }
 
+func NewLocationsService(s *Service) *LocationsService {
+	rs := &LocationsService{s: s}
+	rs.WorkforcePools = NewLocationsWorkforcePoolsService(s)
+	return rs
+}
+
+type LocationsService struct {
+	s *Service
+
+	WorkforcePools *LocationsWorkforcePoolsService
+}
+
+func NewLocationsWorkforcePoolsService(s *Service) *LocationsWorkforcePoolsService {
+	rs := &LocationsWorkforcePoolsService{s: s}
+	return rs
+}
+
+type LocationsWorkforcePoolsService struct {
+	s *Service
+}
+
 func NewProjectsService(s *Service) *ProjectsService {
 	rs := &ProjectsService{s: s}
+	rs.Locations = NewProjectsLocationsService(s)
 	rs.ServiceAccounts = NewProjectsServiceAccountsService(s)
 	return rs
 }
@@ -164,7 +188,30 @@ func NewProjectsService(s *Service) *ProjectsService {
 type ProjectsService struct {
 	s *Service
 
+	Locations *ProjectsLocationsService
+
 	ServiceAccounts *ProjectsServiceAccountsService
+}
+
+func NewProjectsLocationsService(s *Service) *ProjectsLocationsService {
+	rs := &ProjectsLocationsService{s: s}
+	rs.WorkloadIdentityPools = NewProjectsLocationsWorkloadIdentityPoolsService(s)
+	return rs
+}
+
+type ProjectsLocationsService struct {
+	s *Service
+
+	WorkloadIdentityPools *ProjectsLocationsWorkloadIdentityPoolsService
+}
+
+func NewProjectsLocationsWorkloadIdentityPoolsService(s *Service) *ProjectsLocationsWorkloadIdentityPoolsService {
+	rs := &ProjectsLocationsWorkloadIdentityPoolsService{s: s}
+	return rs
+}
+
+type ProjectsLocationsWorkloadIdentityPoolsService struct {
+	s *Service
 }
 
 func NewProjectsServiceAccountsService(s *Service) *ProjectsServiceAccountsService {
@@ -218,9 +265,9 @@ type GenerateAccessTokenRequest struct {
 	NullFields []string `json:"-"`
 }
 
-func (s *GenerateAccessTokenRequest) MarshalJSON() ([]byte, error) {
+func (s GenerateAccessTokenRequest) MarshalJSON() ([]byte, error) {
 	type NoMethod GenerateAccessTokenRequest
-	return gensupport.MarshalJSON(NoMethod(*s), s.ForceSendFields, s.NullFields)
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
 type GenerateAccessTokenResponse struct {
@@ -244,9 +291,9 @@ type GenerateAccessTokenResponse struct {
 	NullFields []string `json:"-"`
 }
 
-func (s *GenerateAccessTokenResponse) MarshalJSON() ([]byte, error) {
+func (s GenerateAccessTokenResponse) MarshalJSON() ([]byte, error) {
 	type NoMethod GenerateAccessTokenResponse
-	return gensupport.MarshalJSON(NoMethod(*s), s.ForceSendFields, s.NullFields)
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
 type GenerateIdTokenRequest struct {
@@ -265,6 +312,11 @@ type GenerateIdTokenRequest struct {
 	// IncludeEmail: Include the service account email in the token. If set to
 	// `true`, the token will contain `email` and `email_verified` claims.
 	IncludeEmail bool `json:"includeEmail,omitempty"`
+	// OrganizationNumberIncluded: Include the organization number of the service
+	// account in the token. If set to `true`, the token will contain a
+	// `google.organization_number` claim. The value of the claim will be `null` if
+	// the service account isn't associated with an organization.
+	OrganizationNumberIncluded bool `json:"organizationNumberIncluded,omitempty"`
 	// ForceSendFields is a list of field names (e.g. "Audience") to
 	// unconditionally include in API requests. By default, fields with empty or
 	// default values are omitted from API requests. See
@@ -278,13 +330,21 @@ type GenerateIdTokenRequest struct {
 	NullFields []string `json:"-"`
 }
 
-func (s *GenerateIdTokenRequest) MarshalJSON() ([]byte, error) {
+func (s GenerateIdTokenRequest) MarshalJSON() ([]byte, error) {
 	type NoMethod GenerateIdTokenRequest
-	return gensupport.MarshalJSON(NoMethod(*s), s.ForceSendFields, s.NullFields)
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
 type GenerateIdTokenResponse struct {
-	// Token: The OpenId Connect ID token.
+	// Token: The OpenId Connect ID token. The token is a JSON Web Token (JWT) that
+	// contains a payload with claims. See the JSON Web Token spec
+	// (https://tools.ietf.org/html/rfc7519) for more information. Here is an
+	// example of a decoded JWT payload: ``` { "iss":
+	// "https://accounts.google.com", "iat": 1496953245, "exp": 1496953245, "aud":
+	// "https://www.example.com", "sub": "107517467455664443765", "azp":
+	// "107517467455664443765", "email":
+	// "my-iam-account@my-project.iam.gserviceaccount.com", "email_verified": true,
+	// "google": { "organization_number": 123456 } } ```
 	Token string `json:"token,omitempty"`
 
 	// ServerResponse contains the HTTP response code and headers from the server.
@@ -302,9 +362,39 @@ type GenerateIdTokenResponse struct {
 	NullFields []string `json:"-"`
 }
 
-func (s *GenerateIdTokenResponse) MarshalJSON() ([]byte, error) {
+func (s GenerateIdTokenResponse) MarshalJSON() ([]byte, error) {
 	type NoMethod GenerateIdTokenResponse
-	return gensupport.MarshalJSON(NoMethod(*s), s.ForceSendFields, s.NullFields)
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
+}
+
+// ServiceAccountAllowedLocations: Represents a list of allowed locations for
+// given service account.
+type ServiceAccountAllowedLocations struct {
+	// EncodedLocations: Output only. The hex encoded bitmap of the trust boundary
+	// locations
+	EncodedLocations string `json:"encodedLocations,omitempty"`
+	// Locations: Output only. The human readable trust boundary locations. For
+	// example, ["us-central1", "europe-west1"]
+	Locations []string `json:"locations,omitempty"`
+
+	// ServerResponse contains the HTTP response code and headers from the server.
+	googleapi.ServerResponse `json:"-"`
+	// ForceSendFields is a list of field names (e.g. "EncodedLocations") to
+	// unconditionally include in API requests. By default, fields with empty or
+	// default values are omitted from API requests. See
+	// https://pkg.go.dev/google.golang.org/api#hdr-ForceSendFields for more
+	// details.
+	ForceSendFields []string `json:"-"`
+	// NullFields is a list of field names (e.g. "EncodedLocations") to include in
+	// API requests with the JSON null value. By default, fields with empty values
+	// are omitted from API requests. See
+	// https://pkg.go.dev/google.golang.org/api#hdr-NullFields for more details.
+	NullFields []string `json:"-"`
+}
+
+func (s ServiceAccountAllowedLocations) MarshalJSON() ([]byte, error) {
+	type NoMethod ServiceAccountAllowedLocations
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
 type SignBlobRequest struct {
@@ -332,9 +422,9 @@ type SignBlobRequest struct {
 	NullFields []string `json:"-"`
 }
 
-func (s *SignBlobRequest) MarshalJSON() ([]byte, error) {
+func (s SignBlobRequest) MarshalJSON() ([]byte, error) {
 	type NoMethod SignBlobRequest
-	return gensupport.MarshalJSON(NoMethod(*s), s.ForceSendFields, s.NullFields)
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
 type SignBlobResponse struct {
@@ -369,9 +459,9 @@ type SignBlobResponse struct {
 	NullFields []string `json:"-"`
 }
 
-func (s *SignBlobResponse) MarshalJSON() ([]byte, error) {
+func (s SignBlobResponse) MarshalJSON() ([]byte, error) {
 	type NoMethod SignBlobResponse
-	return gensupport.MarshalJSON(NoMethod(*s), s.ForceSendFields, s.NullFields)
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
 type SignJwtRequest struct {
@@ -403,9 +493,9 @@ type SignJwtRequest struct {
 	NullFields []string `json:"-"`
 }
 
-func (s *SignJwtRequest) MarshalJSON() ([]byte, error) {
+func (s SignJwtRequest) MarshalJSON() ([]byte, error) {
 	type NoMethod SignJwtRequest
-	return gensupport.MarshalJSON(NoMethod(*s), s.ForceSendFields, s.NullFields)
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
 }
 
 type SignJwtResponse struct {
@@ -442,9 +532,291 @@ type SignJwtResponse struct {
 	NullFields []string `json:"-"`
 }
 
-func (s *SignJwtResponse) MarshalJSON() ([]byte, error) {
+func (s SignJwtResponse) MarshalJSON() ([]byte, error) {
 	type NoMethod SignJwtResponse
-	return gensupport.MarshalJSON(NoMethod(*s), s.ForceSendFields, s.NullFields)
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
+}
+
+// WorkforcePoolAllowedLocations: Represents a list of allowed locations for
+// given workforce pool.
+type WorkforcePoolAllowedLocations struct {
+	// EncodedLocations: Output only. The hex encoded bitmap of the trust boundary
+	// locations
+	EncodedLocations string `json:"encodedLocations,omitempty"`
+	// Locations: Output only. The human readable trust boundary locations. For
+	// example, ["us-central1", "europe-west1"]
+	Locations []string `json:"locations,omitempty"`
+
+	// ServerResponse contains the HTTP response code and headers from the server.
+	googleapi.ServerResponse `json:"-"`
+	// ForceSendFields is a list of field names (e.g. "EncodedLocations") to
+	// unconditionally include in API requests. By default, fields with empty or
+	// default values are omitted from API requests. See
+	// https://pkg.go.dev/google.golang.org/api#hdr-ForceSendFields for more
+	// details.
+	ForceSendFields []string `json:"-"`
+	// NullFields is a list of field names (e.g. "EncodedLocations") to include in
+	// API requests with the JSON null value. By default, fields with empty values
+	// are omitted from API requests. See
+	// https://pkg.go.dev/google.golang.org/api#hdr-NullFields for more details.
+	NullFields []string `json:"-"`
+}
+
+func (s WorkforcePoolAllowedLocations) MarshalJSON() ([]byte, error) {
+	type NoMethod WorkforcePoolAllowedLocations
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
+}
+
+// WorkloadIdentityPoolAllowedLocations: Represents a list of allowed locations
+// for given workload identity pool.
+type WorkloadIdentityPoolAllowedLocations struct {
+	// EncodedLocations: Output only. The hex encoded bitmap of the trust boundary
+	// locations
+	EncodedLocations string `json:"encodedLocations,omitempty"`
+	// Locations: Output only. The human readable trust boundary locations. For
+	// example, ["us-central1", "europe-west1"]
+	Locations []string `json:"locations,omitempty"`
+
+	// ServerResponse contains the HTTP response code and headers from the server.
+	googleapi.ServerResponse `json:"-"`
+	// ForceSendFields is a list of field names (e.g. "EncodedLocations") to
+	// unconditionally include in API requests. By default, fields with empty or
+	// default values are omitted from API requests. See
+	// https://pkg.go.dev/google.golang.org/api#hdr-ForceSendFields for more
+	// details.
+	ForceSendFields []string `json:"-"`
+	// NullFields is a list of field names (e.g. "EncodedLocations") to include in
+	// API requests with the JSON null value. By default, fields with empty values
+	// are omitted from API requests. See
+	// https://pkg.go.dev/google.golang.org/api#hdr-NullFields for more details.
+	NullFields []string `json:"-"`
+}
+
+func (s WorkloadIdentityPoolAllowedLocations) MarshalJSON() ([]byte, error) {
+	type NoMethod WorkloadIdentityPoolAllowedLocations
+	return gensupport.MarshalJSON(NoMethod(s), s.ForceSendFields, s.NullFields)
+}
+
+type LocationsWorkforcePoolsGetAllowedLocationsCall struct {
+	s            *Service
+	name         string
+	urlParams_   gensupport.URLParams
+	ifNoneMatch_ string
+	ctx_         context.Context
+	header_      http.Header
+}
+
+// GetAllowedLocations: Returns the trust boundary info for a given workforce
+// pool.
+//
+// - name: Resource name of workforce pool.
+func (r *LocationsWorkforcePoolsService) GetAllowedLocations(name string) *LocationsWorkforcePoolsGetAllowedLocationsCall {
+	c := &LocationsWorkforcePoolsGetAllowedLocationsCall{s: r.s, urlParams_: make(gensupport.URLParams)}
+	c.name = name
+	return c
+}
+
+// Fields allows partial responses to be retrieved. See
+// https://developers.google.com/gdata/docs/2.0/basics#PartialResponse for more
+// details.
+func (c *LocationsWorkforcePoolsGetAllowedLocationsCall) Fields(s ...googleapi.Field) *LocationsWorkforcePoolsGetAllowedLocationsCall {
+	c.urlParams_.Set("fields", googleapi.CombineFields(s))
+	return c
+}
+
+// IfNoneMatch sets an optional parameter which makes the operation fail if the
+// object's ETag matches the given value. This is useful for getting updates
+// only after the object has changed since the last request.
+func (c *LocationsWorkforcePoolsGetAllowedLocationsCall) IfNoneMatch(entityTag string) *LocationsWorkforcePoolsGetAllowedLocationsCall {
+	c.ifNoneMatch_ = entityTag
+	return c
+}
+
+// Context sets the context to be used in this call's Do method.
+func (c *LocationsWorkforcePoolsGetAllowedLocationsCall) Context(ctx context.Context) *LocationsWorkforcePoolsGetAllowedLocationsCall {
+	c.ctx_ = ctx
+	return c
+}
+
+// Header returns a http.Header that can be modified by the caller to add
+// headers to the request.
+func (c *LocationsWorkforcePoolsGetAllowedLocationsCall) Header() http.Header {
+	if c.header_ == nil {
+		c.header_ = make(http.Header)
+	}
+	return c.header_
+}
+
+func (c *LocationsWorkforcePoolsGetAllowedLocationsCall) doRequest(alt string) (*http.Response, error) {
+	reqHeaders := gensupport.SetHeaders(c.s.userAgent(), "", c.header_)
+	if c.ifNoneMatch_ != "" {
+		reqHeaders.Set("If-None-Match", c.ifNoneMatch_)
+	}
+	c.urlParams_.Set("alt", alt)
+	c.urlParams_.Set("prettyPrint", "false")
+	urls := googleapi.ResolveRelative(c.s.BasePath, "v1/{+name}/allowedLocations")
+	urls += "?" + c.urlParams_.Encode()
+	req, err := http.NewRequest("GET", urls, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = reqHeaders
+	googleapi.Expand(req.URL, map[string]string{
+		"name": c.name,
+	})
+	c.s.logger.DebugContext(c.ctx_, "api request", "serviceName", apiName, "rpcName", "iamcredentials.locations.workforcePools.getAllowedLocations", "request", internallog.HTTPRequest(req, nil))
+	return gensupport.SendRequest(c.ctx_, c.s.client, req)
+}
+
+// Do executes the "iamcredentials.locations.workforcePools.getAllowedLocations" call.
+// Any non-2xx status code is an error. Response headers are in either
+// *WorkforcePoolAllowedLocations.ServerResponse.Header or (if a response was
+// returned at all) in error.(*googleapi.Error).Header. Use
+// googleapi.IsNotModified to check whether the returned error was because
+// http.StatusNotModified was returned.
+func (c *LocationsWorkforcePoolsGetAllowedLocationsCall) Do(opts ...googleapi.CallOption) (*WorkforcePoolAllowedLocations, error) {
+	gensupport.SetOptions(c.urlParams_, opts...)
+	res, err := c.doRequest("json")
+	if res != nil && res.StatusCode == http.StatusNotModified {
+		if res.Body != nil {
+			res.Body.Close()
+		}
+		return nil, gensupport.WrapError(&googleapi.Error{
+			Code:   res.StatusCode,
+			Header: res.Header,
+		})
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer googleapi.CloseBody(res)
+	if err := googleapi.CheckResponse(res); err != nil {
+		return nil, gensupport.WrapError(err)
+	}
+	ret := &WorkforcePoolAllowedLocations{
+		ServerResponse: googleapi.ServerResponse{
+			Header:         res.Header,
+			HTTPStatusCode: res.StatusCode,
+		},
+	}
+	target := &ret
+	b, err := gensupport.DecodeResponseBytes(target, res)
+	if err != nil {
+		return nil, err
+	}
+	c.s.logger.DebugContext(c.ctx_, "api response", "serviceName", apiName, "rpcName", "iamcredentials.locations.workforcePools.getAllowedLocations", "response", internallog.HTTPResponse(res, b))
+	return ret, nil
+}
+
+type ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall struct {
+	s            *Service
+	name         string
+	urlParams_   gensupport.URLParams
+	ifNoneMatch_ string
+	ctx_         context.Context
+	header_      http.Header
+}
+
+// GetAllowedLocations: Returns the trust boundary info for a given workload
+// identity pool.
+//
+// - name: Resource name of workload identity pool.
+func (r *ProjectsLocationsWorkloadIdentityPoolsService) GetAllowedLocations(name string) *ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall {
+	c := &ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall{s: r.s, urlParams_: make(gensupport.URLParams)}
+	c.name = name
+	return c
+}
+
+// Fields allows partial responses to be retrieved. See
+// https://developers.google.com/gdata/docs/2.0/basics#PartialResponse for more
+// details.
+func (c *ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall) Fields(s ...googleapi.Field) *ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall {
+	c.urlParams_.Set("fields", googleapi.CombineFields(s))
+	return c
+}
+
+// IfNoneMatch sets an optional parameter which makes the operation fail if the
+// object's ETag matches the given value. This is useful for getting updates
+// only after the object has changed since the last request.
+func (c *ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall) IfNoneMatch(entityTag string) *ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall {
+	c.ifNoneMatch_ = entityTag
+	return c
+}
+
+// Context sets the context to be used in this call's Do method.
+func (c *ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall) Context(ctx context.Context) *ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall {
+	c.ctx_ = ctx
+	return c
+}
+
+// Header returns a http.Header that can be modified by the caller to add
+// headers to the request.
+func (c *ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall) Header() http.Header {
+	if c.header_ == nil {
+		c.header_ = make(http.Header)
+	}
+	return c.header_
+}
+
+func (c *ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall) doRequest(alt string) (*http.Response, error) {
+	reqHeaders := gensupport.SetHeaders(c.s.userAgent(), "", c.header_)
+	if c.ifNoneMatch_ != "" {
+		reqHeaders.Set("If-None-Match", c.ifNoneMatch_)
+	}
+	c.urlParams_.Set("alt", alt)
+	c.urlParams_.Set("prettyPrint", "false")
+	urls := googleapi.ResolveRelative(c.s.BasePath, "v1/{+name}/allowedLocations")
+	urls += "?" + c.urlParams_.Encode()
+	req, err := http.NewRequest("GET", urls, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = reqHeaders
+	googleapi.Expand(req.URL, map[string]string{
+		"name": c.name,
+	})
+	c.s.logger.DebugContext(c.ctx_, "api request", "serviceName", apiName, "rpcName", "iamcredentials.projects.locations.workloadIdentityPools.getAllowedLocations", "request", internallog.HTTPRequest(req, nil))
+	return gensupport.SendRequest(c.ctx_, c.s.client, req)
+}
+
+// Do executes the "iamcredentials.projects.locations.workloadIdentityPools.getAllowedLocations" call.
+// Any non-2xx status code is an error. Response headers are in either
+// *WorkloadIdentityPoolAllowedLocations.ServerResponse.Header or (if a
+// response was returned at all) in error.(*googleapi.Error).Header. Use
+// googleapi.IsNotModified to check whether the returned error was because
+// http.StatusNotModified was returned.
+func (c *ProjectsLocationsWorkloadIdentityPoolsGetAllowedLocationsCall) Do(opts ...googleapi.CallOption) (*WorkloadIdentityPoolAllowedLocations, error) {
+	gensupport.SetOptions(c.urlParams_, opts...)
+	res, err := c.doRequest("json")
+	if res != nil && res.StatusCode == http.StatusNotModified {
+		if res.Body != nil {
+			res.Body.Close()
+		}
+		return nil, gensupport.WrapError(&googleapi.Error{
+			Code:   res.StatusCode,
+			Header: res.Header,
+		})
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer googleapi.CloseBody(res)
+	if err := googleapi.CheckResponse(res); err != nil {
+		return nil, gensupport.WrapError(err)
+	}
+	ret := &WorkloadIdentityPoolAllowedLocations{
+		ServerResponse: googleapi.ServerResponse{
+			Header:         res.Header,
+			HTTPStatusCode: res.StatusCode,
+		},
+	}
+	target := &ret
+	b, err := gensupport.DecodeResponseBytes(target, res)
+	if err != nil {
+		return nil, err
+	}
+	c.s.logger.DebugContext(c.ctx_, "api response", "serviceName", apiName, "rpcName", "iamcredentials.projects.locations.workloadIdentityPools.getAllowedLocations", "response", internallog.HTTPResponse(res, b))
+	return ret, nil
 }
 
 type ProjectsServiceAccountsGenerateAccessTokenCall struct {
@@ -495,8 +867,7 @@ func (c *ProjectsServiceAccountsGenerateAccessTokenCall) Header() http.Header {
 
 func (c *ProjectsServiceAccountsGenerateAccessTokenCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := gensupport.SetHeaders(c.s.userAgent(), "application/json", c.header_)
-	var body io.Reader = nil
-	body, err := googleapi.WithoutDataWrapper.JSONReader(c.generateaccesstokenrequest)
+	body, err := googleapi.WithoutDataWrapper.JSONBuffer(c.generateaccesstokenrequest)
 	if err != nil {
 		return nil, err
 	}
@@ -512,6 +883,7 @@ func (c *ProjectsServiceAccountsGenerateAccessTokenCall) doRequest(alt string) (
 	googleapi.Expand(req.URL, map[string]string{
 		"name": c.name,
 	})
+	c.s.logger.DebugContext(c.ctx_, "api request", "serviceName", apiName, "rpcName", "iamcredentials.projects.serviceAccounts.generateAccessToken", "request", internallog.HTTPRequest(req, body.Bytes()))
 	return gensupport.SendRequest(c.ctx_, c.s.client, req)
 }
 
@@ -547,9 +919,11 @@ func (c *ProjectsServiceAccountsGenerateAccessTokenCall) Do(opts ...googleapi.Ca
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	b, err := gensupport.DecodeResponseBytes(target, res)
+	if err != nil {
 		return nil, err
 	}
+	c.s.logger.DebugContext(c.ctx_, "api response", "serviceName", apiName, "rpcName", "iamcredentials.projects.serviceAccounts.generateAccessToken", "response", internallog.HTTPResponse(res, b))
 	return ret, nil
 }
 
@@ -600,8 +974,7 @@ func (c *ProjectsServiceAccountsGenerateIdTokenCall) Header() http.Header {
 
 func (c *ProjectsServiceAccountsGenerateIdTokenCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := gensupport.SetHeaders(c.s.userAgent(), "application/json", c.header_)
-	var body io.Reader = nil
-	body, err := googleapi.WithoutDataWrapper.JSONReader(c.generateidtokenrequest)
+	body, err := googleapi.WithoutDataWrapper.JSONBuffer(c.generateidtokenrequest)
 	if err != nil {
 		return nil, err
 	}
@@ -617,6 +990,7 @@ func (c *ProjectsServiceAccountsGenerateIdTokenCall) doRequest(alt string) (*htt
 	googleapi.Expand(req.URL, map[string]string{
 		"name": c.name,
 	})
+	c.s.logger.DebugContext(c.ctx_, "api request", "serviceName", apiName, "rpcName", "iamcredentials.projects.serviceAccounts.generateIdToken", "request", internallog.HTTPRequest(req, body.Bytes()))
 	return gensupport.SendRequest(c.ctx_, c.s.client, req)
 }
 
@@ -652,9 +1026,122 @@ func (c *ProjectsServiceAccountsGenerateIdTokenCall) Do(opts ...googleapi.CallOp
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	b, err := gensupport.DecodeResponseBytes(target, res)
+	if err != nil {
 		return nil, err
 	}
+	c.s.logger.DebugContext(c.ctx_, "api response", "serviceName", apiName, "rpcName", "iamcredentials.projects.serviceAccounts.generateIdToken", "response", internallog.HTTPResponse(res, b))
+	return ret, nil
+}
+
+type ProjectsServiceAccountsGetAllowedLocationsCall struct {
+	s            *Service
+	name         string
+	urlParams_   gensupport.URLParams
+	ifNoneMatch_ string
+	ctx_         context.Context
+	header_      http.Header
+}
+
+// GetAllowedLocations: Returns the trust boundary info for a given service
+// account.
+//
+// - name: Resource name of service account.
+func (r *ProjectsServiceAccountsService) GetAllowedLocations(name string) *ProjectsServiceAccountsGetAllowedLocationsCall {
+	c := &ProjectsServiceAccountsGetAllowedLocationsCall{s: r.s, urlParams_: make(gensupport.URLParams)}
+	c.name = name
+	return c
+}
+
+// Fields allows partial responses to be retrieved. See
+// https://developers.google.com/gdata/docs/2.0/basics#PartialResponse for more
+// details.
+func (c *ProjectsServiceAccountsGetAllowedLocationsCall) Fields(s ...googleapi.Field) *ProjectsServiceAccountsGetAllowedLocationsCall {
+	c.urlParams_.Set("fields", googleapi.CombineFields(s))
+	return c
+}
+
+// IfNoneMatch sets an optional parameter which makes the operation fail if the
+// object's ETag matches the given value. This is useful for getting updates
+// only after the object has changed since the last request.
+func (c *ProjectsServiceAccountsGetAllowedLocationsCall) IfNoneMatch(entityTag string) *ProjectsServiceAccountsGetAllowedLocationsCall {
+	c.ifNoneMatch_ = entityTag
+	return c
+}
+
+// Context sets the context to be used in this call's Do method.
+func (c *ProjectsServiceAccountsGetAllowedLocationsCall) Context(ctx context.Context) *ProjectsServiceAccountsGetAllowedLocationsCall {
+	c.ctx_ = ctx
+	return c
+}
+
+// Header returns a http.Header that can be modified by the caller to add
+// headers to the request.
+func (c *ProjectsServiceAccountsGetAllowedLocationsCall) Header() http.Header {
+	if c.header_ == nil {
+		c.header_ = make(http.Header)
+	}
+	return c.header_
+}
+
+func (c *ProjectsServiceAccountsGetAllowedLocationsCall) doRequest(alt string) (*http.Response, error) {
+	reqHeaders := gensupport.SetHeaders(c.s.userAgent(), "", c.header_)
+	if c.ifNoneMatch_ != "" {
+		reqHeaders.Set("If-None-Match", c.ifNoneMatch_)
+	}
+	c.urlParams_.Set("alt", alt)
+	c.urlParams_.Set("prettyPrint", "false")
+	urls := googleapi.ResolveRelative(c.s.BasePath, "v1/{+name}/allowedLocations")
+	urls += "?" + c.urlParams_.Encode()
+	req, err := http.NewRequest("GET", urls, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header = reqHeaders
+	googleapi.Expand(req.URL, map[string]string{
+		"name": c.name,
+	})
+	c.s.logger.DebugContext(c.ctx_, "api request", "serviceName", apiName, "rpcName", "iamcredentials.projects.serviceAccounts.getAllowedLocations", "request", internallog.HTTPRequest(req, nil))
+	return gensupport.SendRequest(c.ctx_, c.s.client, req)
+}
+
+// Do executes the "iamcredentials.projects.serviceAccounts.getAllowedLocations" call.
+// Any non-2xx status code is an error. Response headers are in either
+// *ServiceAccountAllowedLocations.ServerResponse.Header or (if a response was
+// returned at all) in error.(*googleapi.Error).Header. Use
+// googleapi.IsNotModified to check whether the returned error was because
+// http.StatusNotModified was returned.
+func (c *ProjectsServiceAccountsGetAllowedLocationsCall) Do(opts ...googleapi.CallOption) (*ServiceAccountAllowedLocations, error) {
+	gensupport.SetOptions(c.urlParams_, opts...)
+	res, err := c.doRequest("json")
+	if res != nil && res.StatusCode == http.StatusNotModified {
+		if res.Body != nil {
+			res.Body.Close()
+		}
+		return nil, gensupport.WrapError(&googleapi.Error{
+			Code:   res.StatusCode,
+			Header: res.Header,
+		})
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer googleapi.CloseBody(res)
+	if err := googleapi.CheckResponse(res); err != nil {
+		return nil, gensupport.WrapError(err)
+	}
+	ret := &ServiceAccountAllowedLocations{
+		ServerResponse: googleapi.ServerResponse{
+			Header:         res.Header,
+			HTTPStatusCode: res.StatusCode,
+		},
+	}
+	target := &ret
+	b, err := gensupport.DecodeResponseBytes(target, res)
+	if err != nil {
+		return nil, err
+	}
+	c.s.logger.DebugContext(c.ctx_, "api response", "serviceName", apiName, "rpcName", "iamcredentials.projects.serviceAccounts.getAllowedLocations", "response", internallog.HTTPResponse(res, b))
 	return ret, nil
 }
 
@@ -705,8 +1192,7 @@ func (c *ProjectsServiceAccountsSignBlobCall) Header() http.Header {
 
 func (c *ProjectsServiceAccountsSignBlobCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := gensupport.SetHeaders(c.s.userAgent(), "application/json", c.header_)
-	var body io.Reader = nil
-	body, err := googleapi.WithoutDataWrapper.JSONReader(c.signblobrequest)
+	body, err := googleapi.WithoutDataWrapper.JSONBuffer(c.signblobrequest)
 	if err != nil {
 		return nil, err
 	}
@@ -722,6 +1208,7 @@ func (c *ProjectsServiceAccountsSignBlobCall) doRequest(alt string) (*http.Respo
 	googleapi.Expand(req.URL, map[string]string{
 		"name": c.name,
 	})
+	c.s.logger.DebugContext(c.ctx_, "api request", "serviceName", apiName, "rpcName", "iamcredentials.projects.serviceAccounts.signBlob", "request", internallog.HTTPRequest(req, body.Bytes()))
 	return gensupport.SendRequest(c.ctx_, c.s.client, req)
 }
 
@@ -757,9 +1244,11 @@ func (c *ProjectsServiceAccountsSignBlobCall) Do(opts ...googleapi.CallOption) (
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	b, err := gensupport.DecodeResponseBytes(target, res)
+	if err != nil {
 		return nil, err
 	}
+	c.s.logger.DebugContext(c.ctx_, "api response", "serviceName", apiName, "rpcName", "iamcredentials.projects.serviceAccounts.signBlob", "response", internallog.HTTPResponse(res, b))
 	return ret, nil
 }
 
@@ -810,8 +1299,7 @@ func (c *ProjectsServiceAccountsSignJwtCall) Header() http.Header {
 
 func (c *ProjectsServiceAccountsSignJwtCall) doRequest(alt string) (*http.Response, error) {
 	reqHeaders := gensupport.SetHeaders(c.s.userAgent(), "application/json", c.header_)
-	var body io.Reader = nil
-	body, err := googleapi.WithoutDataWrapper.JSONReader(c.signjwtrequest)
+	body, err := googleapi.WithoutDataWrapper.JSONBuffer(c.signjwtrequest)
 	if err != nil {
 		return nil, err
 	}
@@ -827,6 +1315,7 @@ func (c *ProjectsServiceAccountsSignJwtCall) doRequest(alt string) (*http.Respon
 	googleapi.Expand(req.URL, map[string]string{
 		"name": c.name,
 	})
+	c.s.logger.DebugContext(c.ctx_, "api request", "serviceName", apiName, "rpcName", "iamcredentials.projects.serviceAccounts.signJwt", "request", internallog.HTTPRequest(req, body.Bytes()))
 	return gensupport.SendRequest(c.ctx_, c.s.client, req)
 }
 
@@ -862,8 +1351,10 @@ func (c *ProjectsServiceAccountsSignJwtCall) Do(opts ...googleapi.CallOption) (*
 		},
 	}
 	target := &ret
-	if err := gensupport.DecodeResponse(target, res); err != nil {
+	b, err := gensupport.DecodeResponseBytes(target, res)
+	if err != nil {
 		return nil, err
 	}
+	c.s.logger.DebugContext(c.ctx_, "api response", "serviceName", apiName, "rpcName", "iamcredentials.projects.serviceAccounts.signJwt", "response", internallog.HTTPResponse(res, b))
 	return ret, nil
 }
