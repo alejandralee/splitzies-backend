@@ -24,6 +24,20 @@ curl -X POST http://localhost:8080/receipts/image \
 # Upload with verbose output to see response
 curl -v -X POST http://localhost:8080/receipts/image \
   -F "image=@receipt.jpg"
+
+## Upload Receipt with Document AI
+
+Upload a receipt image or PDF to the `/receipts/document-ai` endpoint:
+
+```bash
+curl -X POST http://localhost:8080/receipts/document-ai \
+  -F "image=@/path/to/your/receipt.jpg"
+```
+
+```bash
+curl -X POST http://localhost:8080/receipts/document-ai \
+  -F "image=@/path/to/your/receipt.pdf"
+```
 ```
 
 ### Example for Heroku deployment:

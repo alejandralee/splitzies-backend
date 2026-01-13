@@ -269,3 +269,136 @@ func UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 }
+
+// UploadReceiptDocumentAIHandler handles receipt uploads using Document AI.
+// Expects multipart/form-data with:
+//   - "image": the receipt image or PDF file
+func UploadReceiptDocumentAIHandler(w http.ResponseWriter, r *http.Request) {
+	// Only allow POST method
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Parse multipart form (max 10MB)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, fmt.Sprintf("Failed to parse multipart form: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	file, header, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get image file: %v", err), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	if header.Size > 10<<20 {
+		http.Error(w, "File too large (max 10MB)", http.StatusBadRequest)
+		return
+	}
+
+	contentType := header.Header.Get("Content-Type")
+	validTypes := map[string]bool{
+		"image/jpeg":      true,
+		"image/jpg":       true,
+		"image/png":       true,
+		"image/gif":       true,
+		"image/webp":      true,
+		"application/pdf": true,
+	}
+	if contentType != "" && !validTypes[contentType] {
+		http.Error(w, fmt.Sprintf("Invalid file type: %s. Supported types: jpeg, jpg, png, gif, webp, pdf", contentType), http.StatusBadRequest)
+		return
+	}
+
+	ctx := context.Background()
+	receiptID := persistence.GenerateReceiptID()
+
+	fileData, err := io.ReadAll(file)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to read file: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	if contentType == "" {
+		contentType = http.DetectContentType(fileData)
+		if !validTypes[contentType] {
+			http.Error(w, fmt.Sprintf("Invalid file type: %s. Supported types: jpeg, jpg, png, gif, webp, pdf", contentType), http.StatusBadRequest)
+			return
+		}
+	}
+
+	imageURL, err := storage.UploadReceiptImageFromReader(ctx, bytes.NewReader(fileData), receiptID, contentType)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to upload image: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	docResult, err := storage.ProcessReceiptWithDocumentAI(ctx, fileData, contentType)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to process receipt with Document AI: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	var ocrTextData *persistence.OCRTextData
+	if docResult.Text != "" {
+		ocrTextData = &persistence.OCRTextData{
+			Text: docResult.Text,
+		}
+	}
+
+	parsedItems := make([]persistence.ReceiptItemDB, len(docResult.Items))
+	for i, item := range docResult.Items {
+		parsedItems[i] = persistence.ReceiptItemDB{
+			Name:         item.Name,
+			Quantity:     item.Quantity,
+			TotalPrice:   item.TotalPrice,
+			PricePerItem: item.PricePerItem,
+		}
+	}
+
+	savedReceipt, err := persistence.SaveReceipt(parsedItems, &imageURL, ocrTextData)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to save receipt: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	responseItems := make([]ReceiptItem, len(parsedItems))
+	for i, item := range parsedItems {
+		totalPrice := item.TotalPrice
+		pricePerItem := item.PricePerItem
+		responseItems[i] = ReceiptItem{
+			Name:         item.Name,
+			Quantity:     item.Quantity,
+			TotalPrice:   &totalPrice,
+			PricePerItem: &pricePerItem,
+		}
+	}
+
+	response := map[string]interface{}{
+		"message":    fmt.Sprintf("Receipt processed successfully with ID: %s", savedReceipt.ID),
+		"receipt_id": savedReceipt.ID,
+		"image_url":  imageURL,
+		"items":      responseItems,
+	}
+	if docResult.MerchantName != "" {
+		response["merchant_name"] = docResult.MerchantName
+	}
+	if docResult.TotalAmount != nil {
+		response["total_amount"] = *docResult.TotalAmount
+	}
+	if docResult.TaxAmount != nil {
+		response["tax_amount"] = *docResult.TaxAmount
+	}
+	if ocrTextData != nil {
+		response["ocr_text"] = ocrTextData.Text
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
+	}
+}

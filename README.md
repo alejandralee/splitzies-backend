@@ -113,6 +113,8 @@ This will create two files:
 
 - `GET /` - Hello world endpoint
 - `POST /receipts` - Add a receipt
+- `POST /receipts/image` - Upload a receipt image (Vision OCR)
+- `POST /receipts/document-ai` - Upload a receipt image/PDF (Document AI receipt processor)
 
 ## Database
 
