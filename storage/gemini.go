@@ -80,12 +80,16 @@ Receipt OCR text:
 		return nil, fmt.Errorf("failed to generate content: %w", err)
 	}
 
+	fmt.Println("Gemini response:", resp)
+
 	responseText := extractGeminiText(resp)
 	if responseText == "" {
 		return nil, fmt.Errorf("empty response from Gemini")
 	}
 
+	fmt.Println("Gemini response text:", responseText)
 	cleaned := cleanGeminiJSON(responseText)
+	fmt.Println("Cleaned Gemini JSON:", cleaned)
 	var parsed geminiReceiptData
 	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
 		return nil, fmt.Errorf("failed to parse Gemini JSON: %w", err)
