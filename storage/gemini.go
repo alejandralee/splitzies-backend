@@ -52,7 +52,7 @@ func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) ([]Receipt
 	}
 	defer client.Close()
 
-	model := client.GenerativeModel("gemini-1.0-pro-002")
+	model := client.GenerativeModel("gemini-3-flash-preview")
 	model.SetTemperature(0.1)
 	model.SetTopP(0.95)
 	model.SetTopK(40)
