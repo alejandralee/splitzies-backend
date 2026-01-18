@@ -12,11 +12,14 @@ import (
 
 // Receipt represents a receipt in the database
 type Receipt struct {
-	ID        string
-	CreatedAt time.Time
-	ImageURL  *string
-	OCRText   *OCRTextData
-	Items     []ReceiptItem
+	ID          string
+	CreatedAt   time.Time
+	ImageURL    *string
+	OCRText     *OCRTextData
+	Currency    *string
+	ReceiptDate *string
+	Title       *string
+	Items       []ReceiptItem
 }
 
 // OCRTextData represents the OCR text data stored as JSONB
@@ -62,7 +65,7 @@ type ReceiptItem struct {
 // SaveReceipt saves a receipt with its items to the database
 // imageURL is optional - pass nil if no image is provided
 // ocrText is optional - pass nil if no OCR text is provided
-func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData) (*Receipt, error) {
+func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData, currency *string, receiptDate *string, title *string) (*Receipt, error) {
 	ctx := context.Background()
 	if DB == nil {
 		return nil, fmt.Errorf("database not initialized")
@@ -87,8 +90,8 @@ func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData) 
 		}
 	}
 
-	// Insert receipt with generated ULID, optional image URL, and optional OCR text
-	_, err = tx.Exec(ctx, "INSERT INTO receipts (id, created_at, image_url, ocr_text) VALUES ($1, CURRENT_TIMESTAMP, $2, $3)", receiptID, imageURL, ocrTextJSON)
+	// Insert receipt with generated ULID, optional image URL, optional OCR text, and Gemini metadata
+	_, err = tx.Exec(ctx, "INSERT INTO receipts (id, created_at, image_url, ocr_text, currency, receipt_date, title) VALUES ($1, CURRENT_TIMESTAMP, $2, $3, $4, $5, $6)", receiptID, imageURL, ocrTextJSON, currency, receiptDate, title)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert receipt: %w", err)
 	}
@@ -121,11 +124,14 @@ func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData) 
 		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
-	// Get receipt with created_at timestamp, image_url, and ocr_text
+	// Get receipt with created_at timestamp, image_url, ocr_text, and metadata
 	var createdAt time.Time
 	var dbImageURL *string
 	var dbOCRTextJSON []byte
-	err = DB.QueryRow(ctx, "SELECT created_at, image_url, ocr_text FROM receipts WHERE id = $1", receiptID).Scan(&createdAt, &dbImageURL, &dbOCRTextJSON)
+	var dbCurrency *string
+	var dbReceiptDate *string
+	var dbTitle *string
+	err = DB.QueryRow(ctx, "SELECT created_at, image_url, ocr_text, currency, receipt_date, title FROM receipts WHERE id = $1", receiptID).Scan(&createdAt, &dbImageURL, &dbOCRTextJSON, &dbCurrency, &dbReceiptDate, &dbTitle)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipt data: %w", err)
 	}
@@ -139,11 +145,14 @@ func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData) 
 	}
 
 	receipt := &Receipt{
-		ID:        receiptID,
-		CreatedAt: createdAt,
-		ImageURL:  dbImageURL,
-		OCRText:   dbOCRText,
-		Items:     dbItems,
+		ID:          receiptID,
+		CreatedAt:   createdAt,
+		ImageURL:    dbImageURL,
+		OCRText:     dbOCRText,
+		Currency:    dbCurrency,
+		ReceiptDate: dbReceiptDate,
+		Title:       dbTitle,
+		Items:       dbItems,
 	}
 
 	return receipt, nil

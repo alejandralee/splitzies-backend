@@ -19,18 +19,30 @@ type geminiReceiptItem struct {
 }
 
 type geminiReceiptData struct {
-	Items []geminiReceiptItem `json:"items"`
+	Items       []geminiReceiptItem `json:"items"`
+	Currency    *string            `json:"currency"`
+	Date        *string            `json:"date"`
+	ReceiptDate *string            `json:"receipt_date"`
+	Title       *string            `json:"title"`
+}
+
+type GeminiReceiptParseResult struct {
+	Items       []ReceiptItemParsed
+	Currency    *string
+	ReceiptDate *string
+	Title       *string
 }
 
 // ParseReceiptItemsWithGemini parses OCR text into receipt items using Gemini.
-func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) ([]ReceiptItemParsed, error) {
+func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) (GeminiReceiptParseResult, error) {
+	var empty GeminiReceiptParseResult
 	if strings.TrimSpace(ocrText) == "" {
-		return nil, fmt.Errorf("ocr text is empty")
+		return empty, fmt.Errorf("ocr text is empty")
 	}
 
 	credsJSON := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 	if credsJSON == "" {
-		return nil, fmt.Errorf("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable is not set")
+		return empty, fmt.Errorf("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable is not set")
 	}
 
 	projectID := os.Getenv("GCP_PROJECT_ID")
@@ -38,7 +50,7 @@ func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) ([]Receipt
 		projectID = os.Getenv("GOOGLE_CLOUD_PROJECT")
 	}
 	if projectID == "" {
-		return nil, fmt.Errorf("GCP_PROJECT_ID environment variable is not set")
+		return empty, fmt.Errorf("GCP_PROJECT_ID environment variable is not set")
 	}
 
 	location := os.Getenv("VERTEX_AI_LOCATION")
@@ -51,7 +63,7 @@ func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) ([]Receipt
 		Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to load Google credentials: %w", err)
+		return empty, fmt.Errorf("failed to load Google credentials: %w", err)
 	}
 
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
@@ -61,7 +73,7 @@ func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) ([]Receipt
 		Credentials: creds,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create GenAI client: %w", err)
+		return empty, fmt.Errorf("failed to create GenAI client: %w", err)
 	}
 
 	prompt := fmt.Sprintf(`You are parsing OCR text from a receipt.
@@ -69,12 +81,18 @@ Return ONLY valid JSON with this schema:
 {
   "items": [
     {"name": "string", "quantity": 1, "total_price": 1.23, "price_per_item": 1.23}
-  ]
+  ],
+  "currency": "string",
+  "receipt_date": "string",
+  "title": "string"
 }
 Rules:
 - Include only line items (exclude tax, totals, payment, change, headers, footers).
 - If quantity is missing, use 1.
 - If total_price or price_per_item is missing, set it to null.
+- Try to convert the name into a human-readable format (e.g., "Coca-Cola" instead of "COLA").
+- Title should be the restaurant name or where the receipt is from.
+- If currency is not explicit, try to infer it from the context (e.g., "USD" for US-based receipts). If no currency is found, leave it null.
 
 Receipt OCR text:
 ---
@@ -89,14 +107,14 @@ Receipt OCR text:
 	}
 	resp, err := client.Models.GenerateContent(ctx, "gemini-2.0-flash-001", genai.Text(prompt), config)
 	if err != nil {
-		return nil, fmt.Errorf("failed to generate content: %w", err)
+		return empty, fmt.Errorf("failed to generate content: %w", err)
 	}
 
 	fmt.Println("Gemini response:", resp)
 
 	responseText := extractGeminiText(resp)
 	if responseText == "" {
-		return nil, fmt.Errorf("empty response from Gemini")
+		return empty, fmt.Errorf("empty response from Gemini")
 	}
 
 	fmt.Println("Gemini response text:", responseText)
@@ -104,7 +122,7 @@ Receipt OCR text:
 	fmt.Println("Cleaned Gemini JSON:", cleaned)
 	var parsed geminiReceiptData
 	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
-		return nil, fmt.Errorf("failed to parse Gemini JSON: %w", err)
+		return empty, fmt.Errorf("failed to parse Gemini JSON: %w", err)
 	}
 
 	items := make([]ReceiptItemParsed, 0, len(parsed.Items))
@@ -147,7 +165,17 @@ Receipt OCR text:
 		})
 	}
 
-	return items, nil
+	receiptDate := normalizeOptionalString(parsed.ReceiptDate)
+	if receiptDate == nil {
+		receiptDate = normalizeOptionalString(parsed.Date)
+	}
+
+	return GeminiReceiptParseResult{
+		Items:       items,
+		Currency:    normalizeOptionalString(parsed.Currency),
+		ReceiptDate: receiptDate,
+		Title:       normalizeOptionalString(parsed.Title),
+	}, nil
 }
 
 func extractGeminiText(resp *genai.GenerateContentResponse) string {
@@ -156,6 +184,17 @@ func extractGeminiText(resp *genai.GenerateContentResponse) string {
 	}
 
 	return strings.TrimSpace(resp.Text())
+}
+
+func normalizeOptionalString(value *string) *string {
+	if value == nil {
+		return nil
+	}
+	trimmed := strings.TrimSpace(*value)
+	if trimmed == "" {
+		return nil
+	}
+	return &trimmed
 }
 
 func cleanGeminiJSON(input string) string {

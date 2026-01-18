@@ -108,7 +108,7 @@ func AddReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save receipt to database (no image for manual entry)
-	savedReceipt, err := persistence.SaveReceipt(itemsToSave, nil, nil)
+	savedReceipt, err := persistence.SaveReceipt(itemsToSave, nil, nil, nil, nil, nil)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save receipt: %v", err), http.StatusInternalServerError)
 		return
@@ -200,6 +200,9 @@ func UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
 	ocrText, err := storage.PerformOCRFromBytes(ctx, fileData)
 	var parsedItems []persistence.ReceiptItemDB
 	var ocrTextData *persistence.OCRTextData
+	var currency *string
+	var receiptDate *string
+	var title *string
 
 	if err != nil {
 		// OCR failed - log but don't fail the request
@@ -212,16 +215,20 @@ func UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Try to parse receipt items from OCR text using Gemini
-		parsedItemsRaw, parseErr := storage.ParseReceiptItemsWithGemini(ctx, ocrText)
+		parseResult, parseErr := storage.ParseReceiptItemsWithGemini(ctx, ocrText)
 		if parseErr != nil {
 			fmt.Printf("Warning: Gemini parse failed: %v\n", parseErr)
-			parsedItemsRaw = storage.ExtractReceiptItemsFromText(ocrText)
+			parseResult.Items = storage.ExtractReceiptItemsFromText(ocrText)
+		} else {
+			currency = parseResult.Currency
+			receiptDate = parseResult.ReceiptDate
+			title = parseResult.Title
 		}
 
-		if len(parsedItemsRaw) > 0 {
+		if len(parseResult.Items) > 0 {
 			// Successfully parsed items - convert to ReceiptItemDB and save them
-			parsedItems = make([]persistence.ReceiptItemDB, len(parsedItemsRaw))
-			for i, item := range parsedItemsRaw {
+			parsedItems = make([]persistence.ReceiptItemDB, len(parseResult.Items))
+			for i, item := range parseResult.Items {
 				parsedItems[i] = persistence.ReceiptItemDB{
 					Name:         item.Name,
 					Quantity:     item.Quantity,
@@ -233,8 +240,8 @@ func UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
 		// If items couldn't be parsed, we still save the OCR text (already set above)
 	}
 
-	// Save receipt with image URL, parsed items (if any), and OCR text
-	savedReceipt, err := persistence.SaveReceipt(parsedItems, &imageURL, ocrTextData)
+	// Save receipt with image URL, parsed items (if any), OCR text, and Gemini metadata
+	savedReceipt, err := persistence.SaveReceipt(parsedItems, &imageURL, ocrTextData, currency, receiptDate, title)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save receipt: %v", err), http.StatusInternalServerError)
 		return
