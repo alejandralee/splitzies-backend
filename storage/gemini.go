@@ -7,8 +7,8 @@ import (
 	"os"
 	"strings"
 
-	"cloud.google.com/go/vertexai/genai"
-	"google.golang.org/api/option"
+	"cloud.google.com/go/auth/credentials"
+	"google.golang.org/genai"
 )
 
 type geminiReceiptItem struct {
@@ -46,17 +46,23 @@ func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) ([]Receipt
 		location = "us-central1"
 	}
 
-	client, err := genai.NewClient(ctx, projectID, location, option.WithCredentialsJSON([]byte(credsJSON)))
+	creds, err := credentials.DetectDefault(&credentials.DetectOptions{
+		CredentialsJSON: []byte(credsJSON),
+		Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to create Vertex AI client: %w", err)
+		return nil, fmt.Errorf("failed to load Google credentials: %w", err)
 	}
-	defer client.Close()
 
-	model := client.GenerativeModel("gemini-3-flash-preview")
-	model.SetTemperature(0.1)
-	model.SetTopP(0.95)
-	model.SetTopK(40)
-	model.SetMaxOutputTokens(1024)
+	client, err := genai.NewClient(ctx, &genai.ClientConfig{
+		Project:     projectID,
+		Location:    location,
+		Backend:     genai.BackendVertexAI,
+		Credentials: creds,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create GenAI client: %w", err)
+	}
 
 	prompt := fmt.Sprintf(`You are parsing OCR text from a receipt.
 Return ONLY valid JSON with this schema:
@@ -75,7 +81,13 @@ Receipt OCR text:
 %s
 ---`, ocrText)
 
-	resp, err := model.GenerateContent(ctx, genai.Text(prompt))
+	config := &genai.GenerateContentConfig{
+		Temperature:     genai.Ptr(float32(0.1)),
+		TopP:            genai.Ptr(float32(0.95)),
+		TopK:            genai.Ptr(float32(40)),
+		MaxOutputTokens: 1024,
+	}
+	resp, err := client.Models.GenerateContent(ctx, "gemini-3-flash-preview", genai.Text(prompt), config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate content: %w", err)
 	}
@@ -139,23 +151,11 @@ Receipt OCR text:
 }
 
 func extractGeminiText(resp *genai.GenerateContentResponse) string {
-	if resp == nil || len(resp.Candidates) == 0 {
+	if resp == nil {
 		return ""
 	}
 
-	var builder strings.Builder
-	for _, candidate := range resp.Candidates {
-		if candidate == nil || candidate.Content == nil {
-			continue
-		}
-		for _, part := range candidate.Content.Parts {
-			if text, ok := part.(genai.Text); ok {
-				builder.WriteString(string(text))
-			}
-		}
-	}
-
-	return strings.TrimSpace(builder.String())
+	return strings.TrimSpace(resp.Text())
 }
 
 func cleanGeminiJSON(input string) string {
