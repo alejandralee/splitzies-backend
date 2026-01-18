@@ -48,7 +48,7 @@ func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) ([]Receipt
 
 	creds, err := credentials.DetectDefault(&credentials.DetectOptions{
 		CredentialsJSON: []byte(credsJSON),
-		Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
+		// Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to load Google credentials: %w", err)
