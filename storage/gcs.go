@@ -114,9 +114,8 @@ func UploadReceiptImageFromReader(ctx context.Context, reader io.Reader, receipt
 		}
 	}
 
-	// Generate object name with receipt ID and timestamp
-	timestamp := time.Now().Format("20060102_150405")
-	objectName := fmt.Sprintf("receipts/%s/%s%s", receiptID, timestamp, ext)
+	// Generate object name with receipt ID
+	objectName := fmt.Sprintf("receipts/%s%s", receiptID, ext)
 
 	// Create writer for the object
 	wc := client.Bucket(bucketName).Object(objectName).NewWriter(ctx)
