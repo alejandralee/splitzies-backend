@@ -1,16 +1,19 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
 
 	"splitzies/persistence"
+	"splitzies/storage"
 	"splitzies/transport"
 )
 
 func main() {
+	ctx := context.Background()
 	// Initialize database
 	if err := persistence.InitDB(); err != nil {
 		log.Fatalf("Failed to initialize database: %v", err)
@@ -31,10 +34,24 @@ func main() {
 	}
 	addr := ":" + port
 
-	http.HandleFunc("/", transport.HelloWorldHandler)
-	http.HandleFunc("/receipts", transport.AddReceiptHandler)
+	// Initialize Google Cloud Storage client
+	gcsClient, err := storage.NewGCSClient(ctx)
+	if err != nil {
+		log.Fatalf("Failed to create GCS client: %v", err)
+	}
+	defer gcsClient.Close()
+
+	// Initialize Vision client
+	visionClient, err := storage.NewVisionClient(ctx)
+	if err != nil {
+		log.Fatalf("Failed to create Vision client: %v", err)
+	}
+	defer visionClient.Close()
+
+	transport := transport.NewTransport(gcsClient, visionClient)
+
+	// http.HandleFunc("/receipts", transport.AddReceiptHandler)
 	http.HandleFunc("/receipts/image", transport.UploadReceiptImageHandler)
-	// http.HandleFunc("/receipts/document-ai", transport.UploadReceiptDocumentAIHandler)
 
 	fmt.Printf("Server starting on %s\n", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
