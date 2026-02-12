@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"embed"
 	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
@@ -12,6 +14,9 @@ import (
 	"splitzies/storage"
 	"splitzies/transport"
 )
+
+//go:embed swagger/docs.html swagger.yaml
+var swaggerFS embed.FS
 
 func main() {
 	ctx := context.Background()
@@ -69,6 +74,21 @@ func main() {
 		}
 
 		http.NotFound(w, r)
+	})
+
+	// Swagger UI - docs.html loads the OpenAPI spec from /swagger.yaml
+	http.HandleFunc("/swagger/docs.html", func(w http.ResponseWriter, r *http.Request) {
+		data, _ := fs.ReadFile(swaggerFS, "swagger/docs.html")
+		w.Header().Set("Content-Type", "text/html")
+		w.Write(data)
+	})
+	http.HandleFunc("/swagger.yaml", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/x-yaml")
+		data, _ := fs.ReadFile(swaggerFS, "swagger.yaml")
+		w.Write(data)
+	})
+	http.HandleFunc("/swagger", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/swagger/docs.html", http.StatusFound)
 	})
 
 	fmt.Printf("Server starting on %s\n", addr)
