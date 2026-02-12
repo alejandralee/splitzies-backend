@@ -142,6 +142,77 @@ func (c *Client) GetReceiptUsers(ctx context.Context, receiptID string) ([]Recei
 	return users, nil
 }
 
+// ReceiptExists checks if a receipt exists
+func (c *Client) ReceiptExists(ctx context.Context, receiptID string) (bool, error) {
+	var exists bool
+	err := c.db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM receipts WHERE id = $1)", receiptID).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to check receipt existence: %w", err)
+	}
+	return exists, nil
+}
+
+// GetReceiptItems gets all items for a receipt
+func (c *Client) GetReceiptItems(ctx context.Context, receiptID string) ([]ReceiptItem, error) {
+	rows, err := c.db.Query(ctx, `
+		SELECT id, receipt_id, name, quantity, total_price, price_per_item
+		FROM receipt_items
+		WHERE receipt_id = $1
+		ORDER BY id ASC
+	`, receiptID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query receipt items: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]ReceiptItem, 0)
+	for rows.Next() {
+		var item ReceiptItem
+		err := rows.Scan(&item.ID, &item.ReceiptID, &item.Name, &item.Quantity, &item.TotalPrice, &item.PricePerItem)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan receipt item: %w", err)
+		}
+		items = append(items, item)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating receipt items: %w", err)
+	}
+
+	return items, nil
+}
+
+// GetReceiptAssignments gets all user-item assignments for a receipt
+func (c *Client) GetReceiptAssignments(ctx context.Context, receiptID string) ([]ReceiptUserItem, error) {
+	rows, err := c.db.Query(ctx, `
+		SELECT rui.id, rui.receipt_user_id, rui.receipt_item_id, rui.amount_paid, rui.created_at
+		FROM receipt_user_items rui
+		JOIN receipt_users ru ON ru.id = rui.receipt_user_id
+		WHERE ru.receipt_id = $1
+		ORDER BY rui.created_at ASC
+	`, receiptID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query receipt assignments: %w", err)
+	}
+	defer rows.Close()
+
+	assignments := make([]ReceiptUserItem, 0)
+	for rows.Next() {
+		var a ReceiptUserItem
+		err := rows.Scan(&a.ID, &a.ReceiptUserID, &a.ReceiptItemID, &a.AmountPaid, &a.CreatedAt)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan receipt assignment: %w", err)
+		}
+		assignments = append(assignments, a)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, fmt.Errorf("error iterating receipt assignments: %w", err)
+	}
+
+	return assignments, nil
+}
+
 // GetUserItems gets all items assigned to a user
 func (c *Client) GetUserItems(ctx context.Context, receiptUserID string) ([]ReceiptUserItem, error) {
 	rows, err := c.db.Query(ctx, `
