@@ -142,6 +142,55 @@ func (c *Client) GetReceiptUsers(ctx context.Context, receiptID string) ([]Recei
 	return users, nil
 }
 
+// ReceiptTaxTip holds tax and tip for a receipt
+type ReceiptTaxTip struct {
+	Tax *float64
+	Tip *float64
+}
+
+// GetReceiptTaxTip gets tax and tip for a receipt
+func (c *Client) GetReceiptTaxTip(ctx context.Context, receiptID string) (*ReceiptTaxTip, error) {
+	var tax, tip *float64
+	err := c.db.QueryRow(ctx, "SELECT tax, tip FROM receipts WHERE id = $1", receiptID).Scan(&tax, &tip)
+	if err != nil {
+		if strings.Contains(err.Error(), "no rows") {
+			return nil, fmt.Errorf("receipt not found")
+		}
+		return nil, fmt.Errorf("failed to get receipt tax/tip: %w", err)
+	}
+	return &ReceiptTaxTip{Tax: tax, Tip: tip}, nil
+}
+
+// UpdateReceiptTaxTip sets tax and/or tip for a receipt. Pass nil for fields to leave unchanged.
+func (c *Client) UpdateReceiptTaxTip(ctx context.Context, receiptID string, tax, tip *float64) error {
+	var setClauses []string
+	var args []interface{}
+	argNum := 1
+	if tax != nil {
+		setClauses = append(setClauses, fmt.Sprintf("tax = $%d", argNum))
+		args = append(args, *tax)
+		argNum++
+	}
+	if tip != nil {
+		setClauses = append(setClauses, fmt.Sprintf("tip = $%d", argNum))
+		args = append(args, *tip)
+		argNum++
+	}
+	if len(setClauses) == 0 {
+		return fmt.Errorf("at least one of tax or tip must be provided")
+	}
+	args = append(args, receiptID)
+	query := fmt.Sprintf("UPDATE receipts SET %s WHERE id = $%d", strings.Join(setClauses, ", "), argNum)
+	result, err := c.db.Exec(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("failed to update receipt tax/tip: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("receipt not found")
+	}
+	return nil
+}
+
 // ReceiptExists checks if a receipt exists
 func (c *Client) ReceiptExists(ctx context.Context, receiptID string) (bool, error) {
 	var exists bool

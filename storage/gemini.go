@@ -24,6 +24,8 @@ type geminiReceiptData struct {
 	Date        *string            `json:"date"`
 	ReceiptDate *string            `json:"receipt_date"`
 	Title       *string            `json:"title"`
+	Tax         *float64           `json:"tax"`
+	Tip         *float64           `json:"tip"`
 }
 
 type GeminiReceiptParseResult struct {
@@ -31,6 +33,8 @@ type GeminiReceiptParseResult struct {
 	Currency    *string
 	ReceiptDate *string
 	Title       *string
+	Tax         *float64
+	Tip         *float64
 }
 
 // ParseReceiptItemsWithGemini parses OCR text into receipt items using Gemini.
@@ -84,15 +88,19 @@ Return ONLY valid JSON with this schema:
   ],
   "currency": "string",
   "receipt_date": "string",
-  "title": "string"
+  "title": "string",
+  "tax": 1.23,
+  "tip": 2.50
 }
 Rules:
-- Include only line items (exclude tax, totals, payment, change, headers, footers).
+- Include only line items in items (exclude tax, totals, payment, change, headers, footers).
 - If quantity is missing, use 1.
 - If total_price or price_per_item is missing, set it to null.
 - Try to convert the name into a human-readable format (e.g., "Coca-Cola" instead of "COLA").
 - Title should be the restaurant name or where the receipt is from.
 - If currency is not explicit, try to infer it from the context (e.g., "USD" for US-based receipts). If no currency is found, leave it null.
+- tax: Parse the sales tax amount if present (e.g., "Tax: $1.50"). Null if not found.
+- tip: Parse the tip/gratuity amount if present (e.g., "Tip: $5.00"). Null if not found.
 
 Receipt OCR text:
 ---
@@ -175,6 +183,8 @@ Receipt OCR text:
 		Currency:    normalizeOptionalString(parsed.Currency),
 		ReceiptDate: receiptDate,
 		Title:       normalizeOptionalString(parsed.Title),
+		Tax:         parsed.Tax,
+		Tip:         parsed.Tip,
 	}, nil
 }
 
