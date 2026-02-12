@@ -53,7 +53,68 @@ paths:
         '500':
           description: Internal server error
 
+  /receipts/{receipt_id}:
+    get:
+      summary: Get receipt with bill split data
+      description: |
+        Returns the full receipt with users, items, and assignments (user-item correlation).
+        The assignments array links users to items for building the bill split UI - each
+        assignment has user_id, item_id, and optional amount_paid (null = equal split).
+      operationId: getReceipt
+      parameters:
+        - name: receipt_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The receipt ID
+      responses:
+        '200':
+          description: Receipt with users, items, and assignments
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetReceiptResponse'
+        '404':
+          description: Receipt not found
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          description: Method not allowed
+        '500':
+          description: Internal server error
+
   /receipts/{receipt_id}/users:
+    get:
+      summary: Get users for receipt
+      description: List all users/participants associated with a receipt.
+      operationId: getReceiptUsers
+      parameters:
+        - name: receipt_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The receipt ID
+      responses:
+        '200':
+          description: List of users
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetReceiptUsersResponse'
+        '404':
+          description: Receipt not found
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          description: Method not allowed
+        '500':
+          description: Internal server error
     post:
       summary: Add user to receipt
       description: Add a user/participant to a receipt for splitting items.
@@ -84,6 +145,36 @@ paths:
             text/plain:
               schema:
                 type: string
+        '404':
+          description: Receipt not found
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          description: Method not allowed
+        '500':
+          description: Internal server error
+
+  /receipts/{receipt_id}/items:
+    get:
+      summary: Get items for receipt
+      description: List all items on a receipt.
+      operationId: getReceiptItems
+      parameters:
+        - name: receipt_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The receipt ID
+      responses:
+        '200':
+          description: List of receipt items
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GetReceiptItemsResponse'
         '404':
           description: Receipt not found
           content:
@@ -259,3 +350,70 @@ components:
                 type: number
                 format: double
                 nullable: true
+
+    GetReceiptResponse:
+      type: object
+      description: Full receipt with users, items, and user-item assignments for bill split
+      properties:
+        receipt_id:
+          type: string
+          description: Receipt ID
+        users:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: Receipt user ID
+              receipt_id:
+                type: string
+              name:
+                type: string
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReceiptItem'
+        assignments:
+          type: array
+          description: User-item correlation for bill split (user_id + item_id + amount_paid)
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: Assignment ID
+              user_id:
+                type: string
+                description: Receipt user ID
+              item_id:
+                type: string
+                description: Receipt item ID
+              amount_paid:
+                type: number
+                format: double
+                nullable: true
+                description: Custom amount (null = equal split)
+
+    GetReceiptUsersResponse:
+      type: object
+      properties:
+        users:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              receipt_id:
+                type: string
+              name:
+                type: string
+
+    GetReceiptItemsResponse:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReceiptItem'

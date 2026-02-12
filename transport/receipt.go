@@ -288,6 +288,195 @@ type AssignItemsToUserResponse struct {
 	} `json:"items"`
 }
 
+// GetReceiptUsersHandler handles getting users for a receipt
+// Expects GET /receipts/{receipt_id}/users
+func (t *Transport) GetReceiptUsersHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
+		return
+	}
+
+	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(pathParts) != 3 || pathParts[0] != "receipts" || pathParts[2] != "users" {
+		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
+		return
+	}
+	receiptID := pathParts[1]
+
+	ctx := context.Background()
+	exists, err := t.persistenceClient.ReceiptExists(ctx, receiptID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to check receipt: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "receipt not found", http.StatusNotFound)
+		return
+	}
+
+	users, err := t.persistenceClient.GetReceiptUsers(ctx, receiptID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get receipt users: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	responseUsers := make([]map[string]interface{}, len(users))
+	for i, u := range users {
+		responseUsers[i] = map[string]interface{}{
+			"id":         u.ID,
+			"receipt_id": u.ReceiptID,
+			"name":       u.Name,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{"users": responseUsers}); err != nil {
+		fmt.Printf("Failed to encode response: %v\n", err)
+	}
+}
+
+// GetReceiptItemsHandler handles getting items for a receipt
+// Expects GET /receipts/{receipt_id}/items
+func (t *Transport) GetReceiptItemsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
+		return
+	}
+
+	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(pathParts) != 3 || pathParts[0] != "receipts" || pathParts[2] != "items" {
+		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
+		return
+	}
+	receiptID := pathParts[1]
+
+	ctx := context.Background()
+	exists, err := t.persistenceClient.ReceiptExists(ctx, receiptID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to check receipt: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "receipt not found", http.StatusNotFound)
+		return
+	}
+
+	items, err := t.persistenceClient.GetReceiptItems(ctx, receiptID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get receipt items: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	responseItems := make([]ReceiptItem, len(items))
+	for i, item := range items {
+		totalPrice := item.TotalPrice
+		pricePerItem := item.PricePerItem
+		responseItems[i] = ReceiptItem{
+			ID:           item.ID,
+			Name:         item.Name,
+			Quantity:     item.Quantity,
+			TotalPrice:   &totalPrice,
+			PricePerItem: &pricePerItem,
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{"items": responseItems}); err != nil {
+		fmt.Printf("Failed to encode response: %v\n", err)
+	}
+}
+
+// GetReceiptHandler handles getting the full receipt with users, items, and assignments (bill split data)
+// Expects GET /receipts/{receipt_id}
+// Returns users, items, and assignments (user-item correlation) for easy frontend bill split UI
+func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
+		return
+	}
+
+	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(pathParts) != 2 || pathParts[0] != "receipts" {
+		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
+		return
+	}
+	receiptID := pathParts[1]
+
+	ctx := context.Background()
+	exists, err := t.persistenceClient.ReceiptExists(ctx, receiptID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to check receipt: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		http.Error(w, "receipt not found", http.StatusNotFound)
+		return
+	}
+
+	users, err := t.persistenceClient.GetReceiptUsers(ctx, receiptID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get receipt users: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	items, err := t.persistenceClient.GetReceiptItems(ctx, receiptID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get receipt items: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	assignments, err := t.persistenceClient.GetReceiptAssignments(ctx, receiptID)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Failed to get receipt assignments: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// Build response - assignments provide the user-item correlation for bill split
+	responseUsers := make([]map[string]interface{}, len(users))
+	for i, u := range users {
+		responseUsers[i] = map[string]interface{}{
+			"id":         u.ID,
+			"receipt_id": u.ReceiptID,
+			"name":       u.Name,
+		}
+	}
+
+	responseItems := make([]ReceiptItem, len(items))
+	for i, item := range items {
+		totalPrice := item.TotalPrice
+		pricePerItem := item.PricePerItem
+		responseItems[i] = ReceiptItem{
+			ID:           item.ID,
+			Name:         item.Name,
+			Quantity:     item.Quantity,
+			TotalPrice:   &totalPrice,
+			PricePerItem: &pricePerItem,
+		}
+	}
+
+	responseAssignments := make([]map[string]interface{}, len(assignments))
+	for i, a := range assignments {
+		responseAssignments[i] = map[string]interface{}{
+			"id":             a.ID,
+			"user_id":        a.ReceiptUserID,
+			"item_id":        a.ReceiptItemID,
+			"amount_paid":    a.AmountPaid,
+		}
+	}
+
+	response := map[string]interface{}{
+		"receipt_id":  receiptID,
+		"users":       responseUsers,
+		"items":       responseItems,
+		"assignments": responseAssignments,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		fmt.Printf("Failed to encode response: %v\n", err)
+	}
+}
+
 // AssignItemsToUserHandler handles assigning items to a user
 // Expects POST /receipts/{receipt_id}/users/{user_id}/items
 func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Request) {

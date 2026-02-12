@@ -12,7 +12,7 @@ import (
 
 	"splitzies/persistence"
 	"splitzies/storage"
-	"splitzies/transport"
+	tr "splitzies/transport"
 )
 
 //go:embed swagger/docs.html swagger.yaml
@@ -56,20 +56,42 @@ func main() {
 	}
 	defer visionClient.Close()
 
-	transport := transport.NewTransport(persistenceClient, gcsClient, visionClient)
+	httpTransport := tr.NewTransport(persistenceClient, gcsClient, visionClient)
 
-	http.HandleFunc("/receipts/image", transport.UploadReceiptImageHandler)
+	http.HandleFunc("/receipts/image", httpTransport.UploadReceiptImageHandler)
 
 	http.HandleFunc("/receipts/", func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
+		pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 
-		if strings.HasSuffix(path, "/users") && r.Method == http.MethodPost {
-			transport.AddUserToReceiptHandler(w, r)
+		// POST /receipts/{receipt_id}/users/{user_id}/items - assign items to user
+		if len(pathParts) == 5 && pathParts[0] == "receipts" && pathParts[2] == "users" && pathParts[4] == "items" && r.Method == http.MethodPost {
+			httpTransport.AssignItemsToUserHandler(w, r)
 			return
 		}
 
-		if strings.HasSuffix(path, "/items") && r.Method == http.MethodPost {
-			transport.AssignItemsToUserHandler(w, r)
+		// /receipts/{receipt_id}/users - GET or POST
+		if len(pathParts) == 3 && pathParts[0] == "receipts" && pathParts[2] == "users" {
+			if r.Method == http.MethodPost {
+				httpTransport.AddUserToReceiptHandler(w, r)
+				return
+			}
+			if r.Method == http.MethodGet {
+				httpTransport.GetReceiptUsersHandler(w, r)
+				return
+			}
+			http.Error(w, tr.NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
+			return
+		}
+
+		// GET /receipts/{receipt_id}/items
+		if len(pathParts) == 3 && pathParts[0] == "receipts" && pathParts[2] == "items" && r.Method == http.MethodGet {
+			httpTransport.GetReceiptItemsHandler(w, r)
+			return
+		}
+
+		// GET /receipts/{receipt_id} - full receipt with users, items, assignments
+		if len(pathParts) == 2 && pathParts[0] == "receipts" && r.Method == http.MethodGet {
+			httpTransport.GetReceiptHandler(w, r)
 			return
 		}
 
