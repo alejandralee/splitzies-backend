@@ -95,6 +95,12 @@ func main() {
 			return
 		}
 
+		// PATCH /receipts/{receipt_id} - update tax/tip (when not parsed from receipt)
+		if len(pathParts) == 2 && pathParts[0] == "receipts" && r.Method == http.MethodPatch {
+			httpTransport.PatchReceiptHandler(w, r)
+			return
+		}
+
 		http.NotFound(w, r)
 	})
 

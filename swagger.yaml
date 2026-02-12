@@ -85,6 +85,52 @@ paths:
           description: Method not allowed
         '500':
           description: Internal server error
+    patch:
+      summary: Update receipt tax and tip
+      description: |
+        Update tax and/or tip on a receipt. Use when values were not parsed from the receipt
+        during upload. Only provided fields are updated.
+      operationId: patchReceipt
+      parameters:
+        - name: receipt_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The receipt ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchReceiptRequest'
+      responses:
+        '200':
+          description: Receipt updated successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Receipt updated successfully"
+        '400':
+          description: Invalid request (body must include at least one of tax or tip)
+          content:
+            text/plain:
+              schema:
+                type: string
+        '404':
+          description: Receipt not found
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          description: Method not allowed
+        '500':
+          description: Internal server error
 
   /receipts/{receipt_id}/users:
     get:
@@ -282,6 +328,14 @@ components:
         ocr_text:
           type: string
           description: Raw OCR text (when available, for debugging)
+        tax:
+          type: number
+          format: double
+          description: Tax amount parsed from receipt (when detected)
+        tip:
+          type: number
+          format: double
+          description: Tip amount parsed from receipt (when detected)
 
     AddUserToReceiptRequest:
       type: object
@@ -417,3 +471,19 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/ReceiptItem'
+
+    PatchReceiptRequest:
+      type: object
+      description: Update tax and/or tip (only provided fields are updated)
+      minProperties: 1
+      properties:
+        tax:
+          type: number
+          format: double
+          nullable: true
+          description: Sales tax amount
+        tip:
+          type: number
+          format: double
+          nullable: true
+          description: Tip/gratuity amount

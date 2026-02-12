@@ -65,7 +65,8 @@ type ReceiptItem struct {
 // SaveReceipt saves a receipt with its items to the database
 // imageURL is optional - pass nil if no image is provided
 // ocrText is optional - pass nil if no OCR text is provided
-func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData, currency *string, receiptDate *string, title *string) (*Receipt, error) {
+// tax and tip are optional - parsed from receipt or can be set via PATCH later
+func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData, currency *string, receiptDate *string, title *string, tax *float64, tip *float64) (*Receipt, error) {
 	ctx := context.Background()
 	if DB == nil {
 		return nil, fmt.Errorf("database not initialized")
@@ -90,8 +91,8 @@ func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData, 
 		}
 	}
 
-	// Insert receipt with generated ULID, optional image URL, optional OCR text, and Gemini metadata
-	_, err = tx.Exec(ctx, "INSERT INTO receipts (id, created_at, image_url, ocr_text, currency, receipt_date, title) VALUES ($1, CURRENT_TIMESTAMP, $2, $3, $4, $5, $6)", receiptID, imageURL, ocrTextJSON, currency, receiptDate, title)
+	// Insert receipt with generated ULID, optional image URL, optional OCR text, Gemini metadata, and tax/tip if parsed
+	_, err = tx.Exec(ctx, "INSERT INTO receipts (id, created_at, image_url, ocr_text, currency, receipt_date, title, tax, tip) VALUES ($1, CURRENT_TIMESTAMP, $2, $3, $4, $5, $6, $7, $8)", receiptID, imageURL, ocrTextJSON, currency, receiptDate, title, tax, tip)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert receipt: %w", err)
 	}

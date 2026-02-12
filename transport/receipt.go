@@ -72,6 +72,8 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 	var currency *string
 	var receiptDate *string
 	var title *string
+	var tax *float64
+	var tip *float64
 
 	if err != nil {
 		// OCR failed - log but don't fail the request
@@ -91,10 +93,14 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 			parseResult.Currency = nil
 			parseResult.ReceiptDate = nil
 			parseResult.Title = nil
+			parseResult.Tax = nil
+			parseResult.Tip = nil
 		}
 		currency = parseResult.Currency
 		receiptDate = parseResult.ReceiptDate
 		title = parseResult.Title
+		tax = parseResult.Tax
+		tip = parseResult.Tip
 
 		if len(parseResult.Items) > 0 {
 			// Successfully parsed items - convert to ReceiptItemDB and save them
@@ -111,8 +117,8 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 		// If items couldn't be parsed, we still save the OCR text (already set above)
 	}
 
-	// Save receipt with image URL, parsed items (if any), OCR text, and Gemini metadata
-	savedReceipt, err := persistence.SaveReceipt(parsedItems, &imageURL, ocrTextData, currency, receiptDate, title)
+	// Save receipt with image URL, parsed items (if any), OCR text, Gemini metadata, and tax/tip if parsed
+	savedReceipt, err := persistence.SaveReceipt(parsedItems, &imageURL, ocrTextData, currency, receiptDate, title, tax, tip)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to save receipt: %v", err), http.StatusInternalServerError)
 		return
@@ -143,6 +149,14 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 	// Include OCR text in response when available (for reference/debugging)
 	if ocrTextData != nil {
 		response["ocr_text"] = ocrTextData.Text
+	}
+
+	// Include tax/tip when parsed from receipt
+	if tax != nil {
+		response["tax"] = *tax
+	}
+	if tip != nil {
+		response["tip"] = *tip
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -286,6 +300,56 @@ type AssignItemsToUserResponse struct {
 		ReceiptItemID string   `json:"receipt_item_id"`
 		AmountPaid    *float64 `json:"amount_paid"`
 	} `json:"items"`
+}
+
+// PatchReceiptRequest represents the request body for updating receipt tax/tip
+type PatchReceiptRequest struct {
+	Tax *float64 `json:"tax"`
+	Tip *float64 `json:"tip"`
+}
+
+// PatchReceiptHandler handles updating tax and tip on a receipt (when not parsed from OCR)
+// Expects PATCH /receipts/{receipt_id}
+// Request body: {"tax": 1.50, "tip": 5.00} - both optional
+func (t *Transport) PatchReceiptHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
+		return
+	}
+
+	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(pathParts) != 2 || pathParts[0] != "receipts" {
+		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
+		return
+	}
+	receiptID := pathParts[1]
+
+	var req PatchReceiptRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, NewValidationError("body", fmt.Sprintf("failed to parse request body: %v", err)).Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Tax == nil && req.Tip == nil {
+		http.Error(w, NewValidationError("body", "at least one of tax or tip is required").Error(), http.StatusBadRequest)
+		return
+	}
+
+	ctx := context.Background()
+	err := t.persistenceClient.UpdateReceiptTaxTip(ctx, receiptID, req.Tax, req.Tip)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Failed to update receipt: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{"message": "Receipt updated successfully"}); err != nil {
+		fmt.Printf("Failed to encode response: %v\n", err)
+	}
 }
 
 // GetReceiptUsersHandler handles getting users for a receipt
