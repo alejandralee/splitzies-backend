@@ -1,17 +1,20 @@
 package transport
 
 import (
+	"splitzies/persistence"
 	"splitzies/storage"
 )
 
 type Transport struct {
-	gcsClient    *storage.GCSClient
-	visionClient *storage.VisionClient
+	persistenceClient *persistence.Client
+	gcsClient         *storage.GCSClient
+	visionClient      *storage.VisionClient
 }
 
-func NewTransport(gcsClient *storage.GCSClient, visionClient *storage.VisionClient) *Transport {
+func NewTransport(persistenceClient *persistence.Client, gcsClient *storage.GCSClient, visionClient *storage.VisionClient) *Transport {
 	return &Transport{
-		gcsClient:    gcsClient,
-		visionClient: visionClient,
+		persistenceClient: persistenceClient,
+		gcsClient:         gcsClient,
+		visionClient:      visionClient,
 	}
 }

@@ -1,0 +1,261 @@
+openapi: 3.0.3
+info:
+  title: Splitzies API
+  description: API for splitting receipts and assigning items to users
+  version: 1.0.0
+  contact:
+    name: Splitzies
+
+servers:
+  - url: http://localhost:8080
+    description: Local development server
+  - url: /
+    description: Current host (for Swagger UI "Try it out")
+
+paths:
+  /receipts/image:
+    post:
+      summary: Upload receipt image
+      description: |
+        Upload a receipt image for OCR processing. The image is stored in GCS, 
+        OCR is performed to extract text, and items are parsed using AI (Gemini).
+        Returns the receipt ID, image URL, and parsed items.
+      operationId: uploadReceiptImage
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - image
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: Receipt image file (JPEG, PNG, GIF, or WebP, max 10MB)
+      responses:
+        '201':
+          description: Receipt image uploaded and processed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UploadReceiptImageResponse'
+        '400':
+          description: Invalid request (missing image, invalid file type, file too large)
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: "validation error: image - failed to get image file"
+        '405':
+          description: Method not allowed
+        '500':
+          description: Internal server error
+
+  /receipts/{receipt_id}/users:
+    post:
+      summary: Add user to receipt
+      description: Add a user/participant to a receipt for splitting items.
+      operationId: addUserToReceipt
+      parameters:
+        - name: receipt_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The receipt ID from the upload response
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddUserToReceiptRequest'
+      responses:
+        '201':
+          description: User added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AddUserToReceiptResponse'
+        '400':
+          description: Invalid request (missing name, invalid path)
+          content:
+            text/plain:
+              schema:
+                type: string
+        '404':
+          description: Receipt not found
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          description: Method not allowed
+        '500':
+          description: Internal server error
+
+  /receipts/{receipt_id}/users/{user_id}/items:
+    post:
+      summary: Assign items to user
+      description: |
+        Assign receipt items to a user. Optionally specify amount_paid for custom amounts;
+        omit or set to null for equal split based on item prices.
+      operationId: assignItemsToUser
+      parameters:
+        - name: receipt_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The receipt ID
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: The receipt user ID (from add user response)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AssignItemsToUserRequest'
+      responses:
+        '201':
+          description: Items assigned successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AssignItemsToUserResponse'
+        '400':
+          description: Invalid request (empty item_ids, invalid path)
+          content:
+            text/plain:
+              schema:
+                type: string
+        '404':
+          description: User or item not found
+          content:
+            text/plain:
+              schema:
+                type: string
+        '405':
+          description: Method not allowed
+        '500':
+          description: Internal server error
+
+components:
+  schemas:
+    ReceiptItem:
+      type: object
+      properties:
+        id:
+          type: string
+          description: Unique item ID
+        name:
+          type: string
+          description: Item name
+        quantity:
+          type: integer
+          description: Item quantity
+        total_price:
+          type: number
+          format: double
+          nullable: true
+          description: Total price for this item
+        price_per_item:
+          type: number
+          format: double
+          nullable: true
+          description: Price per unit
+
+    UploadReceiptImageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Receipt image uploaded successfully with ID: rcpt_abc123"
+        receipt_id:
+          type: string
+          description: Unique receipt ID for subsequent API calls
+        image_url:
+          type: string
+          format: uri
+          description: URL of the uploaded image in GCS
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReceiptItem'
+          description: Parsed items from OCR/AI
+        ocr_text:
+          type: string
+          description: Raw OCR text (when available, for debugging)
+
+    AddUserToReceiptRequest:
+      type: object
+      required:
+        - name
+      properties:
+        name:
+          type: string
+          description: User/participant name
+          example: "John Doe"
+
+    AddUserToReceiptResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "User added to receipt successfully"
+        user:
+          type: object
+          properties:
+            id:
+              type: string
+              description: Receipt user ID (use for assignment)
+            receipt_id:
+              type: string
+            name:
+              type: string
+
+    AssignItemsToUserRequest:
+      type: object
+      required:
+        - item_ids
+      properties:
+        item_ids:
+          type: array
+          items:
+            type: string
+          description: Receipt item IDs to assign to this user
+          minItems: 1
+          example: ["item_abc123", "item_def456"]
+        amount_paid:
+          type: number
+          format: double
+          nullable: true
+          description: Custom amount paid (null = equal split based on item prices)
+
+    AssignItemsToUserResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "Successfully assigned 2 item(s) to user"
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: Assignment ID
+              receipt_user_id:
+                type: string
+              receipt_item_id:
+                type: string
+              amount_paid:
+                type: number
+                format: double
+                nullable: true
