@@ -13,40 +13,47 @@ import (
 
 var DB *pgx.Conn
 
-// InitDB matches the simple Supabase sample: open a pgx connection and log the server version.
-func InitDB() error {
-	databaseURL := os.Getenv("DATABASE_URL")
+// Client wraps the database connection for use by handlers.
+type Client struct {
+	db *pgx.Conn
+}
+
+// NewClient creates a new persistence client and connects to the database.
+func NewClient(ctx context.Context, databaseURL string) (*Client, error) {
 	if databaseURL == "" {
-		return fmt.Errorf("DATABASE_URL environment variable is required")
+		return nil, fmt.Errorf("DATABASE_URL environment variable is required")
 	}
 
-	conn, err := pgx.Connect(context.Background(), databaseURL)
+	conn, err := pgx.Connect(ctx, databaseURL)
 	if err != nil {
-		return fmt.Errorf("failed to connect to the database: %w", err)
+		return nil, fmt.Errorf("failed to connect to the database: %w", err)
 	}
+
+	// Set global DB for receipt.go (SaveReceipt) which uses package-level DB
 	DB = conn
 
-	// Example query to test connection
 	var version string
-	if err := DB.QueryRow(context.Background(), "SELECT version()").Scan(&version); err != nil {
-		return fmt.Errorf("query failed: %w", err)
+	if err := conn.QueryRow(ctx, "SELECT version()").Scan(&version); err != nil {
+		conn.Close(ctx)
+		return nil, fmt.Errorf("query failed: %w", err)
 	}
 
 	log.Printf("Connected to: %s\n", version)
-	return nil
+	return &Client{db: conn}, nil
 }
 
-// CloseDB closes the database connection.
-func CloseDB() error {
-	if DB != nil {
-		return DB.Close(context.Background())
+// Close closes the database connection.
+func (c *Client) Close(ctx context.Context) error {
+	if c.db != nil {
+		DB = nil
+		return c.db.Close(ctx)
 	}
 	return nil
 }
 
 // RunMigrations runs all pending database migrations using goose.
-func RunMigrations(migrationsDir string) error {
-	if DB == nil {
+func (c *Client) RunMigrations(ctx context.Context, migrationsDir string) error {
+	if c.db == nil {
 		return fmt.Errorf("database connection not initialized")
 	}
 
@@ -73,8 +80,6 @@ func RunMigrations(migrationsDir string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create goose provider: %w", err)
 	}
-
-	ctx := context.Background()
 
 	// Run migrations up
 	results, err := provider.Up(ctx)

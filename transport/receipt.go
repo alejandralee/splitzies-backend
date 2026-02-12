@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"splitzies/persistence"
 	"splitzies/storage"
@@ -14,6 +15,7 @@ import (
 
 // ReceiptItem represents a single item in a receipt
 type ReceiptItem struct {
+	ID           string   `json:"id"`
 	Name         string   `json:"name"`
 	Quantity     int      `json:"quantity"`
 	TotalPrice   *float64 `json:"total_price,omitempty"`    // Optional, can be calculated
@@ -116,12 +118,13 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// Convert parsed items to response format
-	responseItems := make([]ReceiptItem, len(parsedItems))
-	for i, item := range parsedItems {
+	// Convert saved receipt items to response format (use savedReceipt.Items which have IDs)
+	responseItems := make([]ReceiptItem, len(savedReceipt.Items))
+	for i, item := range savedReceipt.Items {
 		totalPrice := item.TotalPrice
 		pricePerItem := item.PricePerItem
 		responseItems[i] = ReceiptItem{
+			ID:           item.ID,
 			Name:         item.Name,
 			Quantity:     item.Quantity,
 			TotalPrice:   &totalPrice,
@@ -199,4 +202,158 @@ func (t *Transport) validateReceiptImageRequest(w http.ResponseWriter, r *http.R
 		}
 	}
 	return file, contentType, nil
+}
+
+// AddUserToReceiptRequest represents the request body for adding a user to a receipt
+type AddUserToReceiptRequest struct {
+	Name string `json:"name"`
+}
+
+// AddUserToReceiptResponse represents the response after adding a user to a receipt
+type AddUserToReceiptResponse struct {
+	Message string `json:"message"`
+	User    struct {
+		ID        string `json:"id"`
+		ReceiptID string `json:"receipt_id"`
+		Name      string `json:"name"`
+	} `json:"user"`
+}
+
+// AddUserToReceiptHandler handles adding a user to a receipt
+// Expects POST /receipts/{receipt_id}/users
+// Request body: {"name": "John Doe"}
+func (t *Transport) AddUserToReceiptHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
+		return
+	}
+
+	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(pathParts) != 3 || pathParts[0] != "receipts" || pathParts[2] != "users" {
+		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
+		return
+	}
+	receiptID := pathParts[1]
+
+	var req AddUserToReceiptRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, NewValidationError("body", fmt.Sprintf("failed to parse request body: %v", err)).Error(), http.StatusBadRequest)
+		return
+	}
+
+	if req.Name == "" {
+		http.Error(w, NewValidationError("name", "name is required").Error(), http.StatusBadRequest)
+		return
+	}
+
+	ctx := context.Background()
+	user, err := t.persistenceClient.AddUserToReceipt(ctx, receiptID, req.Name)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		http.Error(w, fmt.Sprintf("Failed to add user to receipt: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	response := AddUserToReceiptResponse{
+		Message: "User added to receipt successfully",
+	}
+	response.User.ID = user.ID
+	response.User.ReceiptID = user.ReceiptID
+	response.User.Name = user.Name
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		fmt.Printf("Failed to encode response: %v\n", err)
+	}
+}
+
+// AssignItemsToUserRequest represents the request body for assigning items to a user
+type AssignItemsToUserRequest struct {
+	ItemIDs    []string `json:"item_ids"`
+	AmountPaid *float64 `json:"amount_paid"`
+}
+
+// AssignItemsToUserResponse represents the response after assigning items to a user
+type AssignItemsToUserResponse struct {
+	Message string `json:"message"`
+	Items   []struct {
+		ID            string   `json:"id"`
+		ReceiptUserID string   `json:"receipt_user_id"`
+		ReceiptItemID string   `json:"receipt_item_id"`
+		AmountPaid    *float64 `json:"amount_paid"`
+	} `json:"items"`
+}
+
+// AssignItemsToUserHandler handles assigning items to a user
+// Expects POST /receipts/{receipt_id}/users/{user_id}/items
+func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
+		return
+	}
+
+	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(pathParts) != 5 || pathParts[0] != "receipts" || pathParts[2] != "users" || pathParts[4] != "items" {
+		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
+		return
+	}
+	userID := pathParts[3]
+
+	var req AssignItemsToUserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, NewValidationError("body", fmt.Sprintf("failed to parse request body: %v", err)).Error(), http.StatusBadRequest)
+		return
+	}
+
+	if len(req.ItemIDs) == 0 {
+		http.Error(w, NewValidationError("item_ids", "at least one item_id is required").Error(), http.StatusBadRequest)
+		return
+	}
+
+	assignedItems := make([]struct {
+		ID            string   `json:"id"`
+		ReceiptUserID string   `json:"receipt_user_id"`
+		ReceiptItemID string   `json:"receipt_item_id"`
+		AmountPaid    *float64 `json:"amount_paid"`
+	}, 0, len(req.ItemIDs))
+
+	ctx := context.Background()
+	for _, itemID := range req.ItemIDs {
+		assignment, err := t.persistenceClient.AssignItemToUser(ctx, userID, itemID, req.AmountPaid)
+		if err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				http.Error(w, err.Error(), http.StatusNotFound)
+				return
+			}
+			http.Error(w, fmt.Sprintf("Failed to assign item %s to user: %v", itemID, err), http.StatusInternalServerError)
+			return
+		}
+
+		assignedItems = append(assignedItems, struct {
+			ID            string   `json:"id"`
+			ReceiptUserID string   `json:"receipt_user_id"`
+			ReceiptItemID string   `json:"receipt_item_id"`
+			AmountPaid    *float64 `json:"amount_paid"`
+		}{
+			ID:            assignment.ID,
+			ReceiptUserID: assignment.ReceiptUserID,
+			ReceiptItemID: assignment.ReceiptItemID,
+			AmountPaid:    assignment.AmountPaid,
+		})
+	}
+
+	response := AssignItemsToUserResponse{
+		Message: fmt.Sprintf("Successfully assigned %d item(s) to user", len(assignedItems)),
+		Items:   assignedItems,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		fmt.Printf("Failed to encode response: %v\n", err)
+	}
 }
