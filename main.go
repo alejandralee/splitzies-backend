@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -56,7 +57,8 @@ func main() {
 	}
 	defer visionClient.Close()
 
-	httpTransport := tr.NewTransport(persistenceClient, gcsClient, visionClient)
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	httpTransport := tr.NewTransport(logger, persistenceClient, gcsClient, visionClient)
 
 	http.HandleFunc("/receipts/image", httpTransport.UploadReceiptImageHandler)
 

@@ -148,6 +148,19 @@ type ReceiptTaxTip struct {
 	Tip *float64
 }
 
+// GetReceiptCurrency gets the currency code for a receipt (nil if not set).
+func (c *Client) GetReceiptCurrency(ctx context.Context, receiptID string) (*string, error) {
+	var currency *string
+	err := c.db.QueryRow(ctx, "SELECT currency FROM receipts WHERE id = $1", receiptID).Scan(&currency)
+	if err != nil {
+		if strings.Contains(err.Error(), "no rows") {
+			return nil, fmt.Errorf("receipt not found")
+		}
+		return nil, fmt.Errorf("failed to get receipt currency: %w", err)
+	}
+	return currency, nil
+}
+
 // GetReceiptTaxTip gets tax and tip for a receipt
 func (c *Client) GetReceiptTaxTip(ctx context.Context, receiptID string) (*ReceiptTaxTip, error) {
 	var tax, tip *float64
