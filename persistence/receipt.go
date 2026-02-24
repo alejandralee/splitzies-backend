@@ -17,7 +17,7 @@ type Receipt struct {
 	ImageURL    *string
 	OCRText     *OCRTextData
 	Currency    *string
-	ReceiptDate *string
+	ReceiptDate *time.Time
 	Title       *string
 	Items       []ReceiptItem
 }
@@ -66,7 +66,7 @@ type ReceiptItem struct {
 // imageURL is optional - pass nil if no image is provided
 // ocrText is optional - pass nil if no OCR text is provided
 // tax and tip are optional - parsed from receipt or can be set via PATCH later
-func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData, currency *string, receiptDate *string, title *string, tax *float64, tip *float64) (*Receipt, error) {
+func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData, currency *string, receiptDate *time.Time, title *string, tax *float64, tip *float64) (*Receipt, error) {
 	ctx := context.Background()
 	if DB == nil {
 		return nil, fmt.Errorf("database not initialized")
@@ -130,7 +130,7 @@ func SaveReceipt(items []ReceiptItemDB, imageURL *string, ocrText *OCRTextData, 
 	var dbImageURL *string
 	var dbOCRTextJSON []byte
 	var dbCurrency *string
-	var dbReceiptDate *string
+	var dbReceiptDate *time.Time
 	var dbTitle *string
 	err = DB.QueryRow(ctx, "SELECT created_at, image_url, ocr_text, currency, receipt_date, title FROM receipts WHERE id = $1", receiptID).Scan(&createdAt, &dbImageURL, &dbOCRTextJSON, &dbCurrency, &dbReceiptDate, &dbTitle)
 	if err != nil {
