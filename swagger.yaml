@@ -59,7 +59,7 @@ paths:
       description: |
         Returns the full receipt with users, items, and assignments (user-item correlation).
         The assignments array links users to items for building the bill split UI - each
-        assignment has user_id, item_id, and amount_paid (computed as equal split among assignees).
+        assignment has user_id, item_id, and amount_owed (computed as equal split among assignees).
       operationId: getReceipt
       parameters:
         - name: receipt_id
@@ -415,13 +415,17 @@ components:
                 type: string
               name:
                 type: string
+              user_total:
+                type: number
+                format: double
+                description: Sum of amount_owed for all items assigned to this user
         items:
           type: array
           items:
             $ref: '#/components/schemas/ReceiptItem'
         assignments:
           type: array
-          description: User-item correlation for bill split. amount_paid is computed as equal split among all users assigned to each item, rounded to whole cents.
+          description: User-item correlation for bill split. amount_owed is computed as equal split among all users assigned to each item, rounded to whole cents.
           items:
             type: object
             properties:
@@ -434,7 +438,7 @@ components:
               item_id:
                 type: string
                 description: Receipt item ID
-              amount_paid:
+              amount_owed:
                 type: number
                 format: double
                 description: Amount this user owes for this item (equal split among assignees, whole cents)
