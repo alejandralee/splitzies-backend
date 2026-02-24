@@ -2,6 +2,7 @@ package money
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/Rhymond/go-money"
@@ -35,15 +36,12 @@ func DecimalPlaces(currency *string) int {
 	return c.Fraction
 }
 
-// Round rounds a value to the currency's decimal places using go-money.
+// Round rounds a value to the currency's decimal places (e.g. 21.95 stays 21.95, not 22.00).
+// Uses standard decimal rounding: round to N decimal places to fix floating-point drift.
 func Round(value float64, currency *string) float64 {
-	code := money.USD
-	if currency != nil && strings.TrimSpace(*currency) != "" {
-		code = strings.ToUpper(*currency)
-	}
-	m := money.NewFromFloat(value, code)
-	rounded := m.Round()
-	return rounded.AsMajorUnits()
+	decimals := DecimalPlaces(currency)
+	scale := math.Pow10(decimals)
+	return math.Round(value*scale) / scale
 }
 
 // NewAmount creates an Amount for JSON marshaling with currency-aware precision.
