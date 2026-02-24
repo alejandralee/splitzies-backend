@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
+	"time"
 
 	"splitzies/persistence"
 	"splitzies/storage"
@@ -70,7 +72,7 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 	var parsedItems []persistence.ReceiptItemDB
 	var ocrTextData *persistence.OCRTextData
 	var currency *string
-	var receiptDate *string
+	var receiptDate *time.Time
 	var title *string
 	var tax *float64
 	var tip *float64
@@ -287,18 +289,16 @@ func (t *Transport) AddUserToReceiptHandler(w http.ResponseWriter, r *http.Reque
 
 // AssignItemsToUserRequest represents the request body for assigning items to a user
 type AssignItemsToUserRequest struct {
-	ItemIDs    []string `json:"item_ids"`
-	AmountPaid *float64 `json:"amount_paid"`
+	ItemIDs []string `json:"item_ids"`
 }
 
 // AssignItemsToUserResponse represents the response after assigning items to a user
 type AssignItemsToUserResponse struct {
 	Message string `json:"message"`
 	Items   []struct {
-		ID            string   `json:"id"`
-		ReceiptUserID string   `json:"receipt_user_id"`
-		ReceiptItemID string   `json:"receipt_item_id"`
-		AmountPaid    *float64 `json:"amount_paid"`
+		ID            string `json:"id"`
+		ReceiptUserID string `json:"receipt_user_id"`
+		ReceiptItemID string `json:"receipt_item_id"`
 	} `json:"items"`
 }
 
@@ -495,6 +495,40 @@ func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Build item ID -> total price map
+	itemPrice := make(map[string]float64)
+	for _, item := range items {
+		itemPrice[item.ID] = item.TotalPrice
+	}
+
+	// Build item ID -> ordered list of (user_id, assignment) for equal split
+	// Each user assigned to an item gets 1/n of the total, rounded to cents
+	itemUserOrder := make(map[string][]string)
+	for _, a := range assignments {
+		itemUserOrder[a.ReceiptItemID] = append(itemUserOrder[a.ReceiptItemID], a.ReceiptUserID)
+	}
+
+	// Compute amount for each (user_id, item_id) pair
+	amountByUserItem := make(map[string]float64)
+	for itemID, userIDs := range itemUserOrder {
+		totalPrice := itemPrice[itemID]
+		n := len(userIDs)
+		if n == 0 {
+			continue
+		}
+		totalCents := int(math.Round(totalPrice * 100))
+		baseCents := totalCents / n
+		remainder := totalCents - baseCents*n
+		for i, userID := range userIDs {
+			cents := baseCents
+			if i < remainder {
+				cents++
+			}
+			key := userID + ":" + itemID
+			amountByUserItem[key] = float64(cents) / 100
+		}
+	}
+
 	// Build response - assignments provide the user-item correlation for bill split
 	responseUsers := make([]map[string]interface{}, len(users))
 	for i, u := range users {
@@ -520,11 +554,13 @@ func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
 
 	responseAssignments := make([]map[string]interface{}, len(assignments))
 	for i, a := range assignments {
+		key := a.ReceiptUserID + ":" + a.ReceiptItemID
+		amount := amountByUserItem[key]
 		responseAssignments[i] = map[string]interface{}{
 			"id":             a.ID,
 			"user_id":        a.ReceiptUserID,
 			"item_id":        a.ReceiptItemID,
-			"amount_paid":    a.AmountPaid,
+			"amount_paid":    amount,
 		}
 	}
 
@@ -568,15 +604,14 @@ func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Requ
 	}
 
 	assignedItems := make([]struct {
-		ID            string   `json:"id"`
-		ReceiptUserID string   `json:"receipt_user_id"`
-		ReceiptItemID string   `json:"receipt_item_id"`
-		AmountPaid    *float64 `json:"amount_paid"`
+		ID            string `json:"id"`
+		ReceiptUserID string `json:"receipt_user_id"`
+		ReceiptItemID string `json:"receipt_item_id"`
 	}, 0, len(req.ItemIDs))
 
 	ctx := context.Background()
 	for _, itemID := range req.ItemIDs {
-		assignment, err := t.persistenceClient.AssignItemToUser(ctx, userID, itemID, req.AmountPaid)
+		assignment, err := t.persistenceClient.AssignItemToUser(ctx, userID, itemID, nil)
 		if err != nil {
 			if strings.Contains(err.Error(), "not found") {
 				http.Error(w, err.Error(), http.StatusNotFound)
@@ -587,15 +622,13 @@ func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Requ
 		}
 
 		assignedItems = append(assignedItems, struct {
-			ID            string   `json:"id"`
-			ReceiptUserID string   `json:"receipt_user_id"`
-			ReceiptItemID string   `json:"receipt_item_id"`
-			AmountPaid    *float64 `json:"amount_paid"`
+			ID            string `json:"id"`
+			ReceiptUserID string `json:"receipt_user_id"`
+			ReceiptItemID string `json:"receipt_item_id"`
 		}{
 			ID:            assignment.ID,
 			ReceiptUserID: assignment.ReceiptUserID,
 			ReceiptItemID: assignment.ReceiptItemID,
-			AmountPaid:    assignment.AmountPaid,
 		})
 	}
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"cloud.google.com/go/auth/credentials"
 	"google.golang.org/genai"
@@ -31,7 +32,7 @@ type geminiReceiptData struct {
 type GeminiReceiptParseResult struct {
 	Items       []ReceiptItemParsed
 	Currency    *string
-	ReceiptDate *string
+	ReceiptDate *time.Time
 	Title       *string
 	Tax         *float64
 	Tip         *float64
@@ -87,7 +88,7 @@ Return ONLY valid JSON with this schema:
     {"name": "string", "quantity": 1, "total_price": 1.23, "price_per_item": 1.23}
   ],
   "currency": "string",
-  "receipt_date": "string",
+  "receipt_date": "string (ISO 8601 date: YYYY-MM-DD preferred)",
   "title": "string",
   "tax": 1.23,
   "tip": 2.50
@@ -173,9 +174,9 @@ Receipt OCR text:
 		})
 	}
 
-	receiptDate := normalizeOptionalString(parsed.ReceiptDate)
+	receiptDate := parseReceiptDate(parsed.ReceiptDate)
 	if receiptDate == nil {
-		receiptDate = normalizeOptionalString(parsed.Date)
+		receiptDate = parseReceiptDate(parsed.Date)
 	}
 
 	return GeminiReceiptParseResult{
@@ -205,6 +206,36 @@ func normalizeOptionalString(value *string) *string {
 		return nil
 	}
 	return &trimmed
+}
+
+// parseReceiptDate parses a date string from OCR into *time.Time.
+// Tries common receipt date formats; returns nil if parsing fails.
+func parseReceiptDate(value *string) *time.Time {
+	if value == nil {
+		return nil
+	}
+	s := strings.TrimSpace(*value)
+	if s == "" {
+		return nil
+	}
+	layouts := []string{
+		"2006-01-02",           // ISO 8601
+		"2006-01-02T15:04:05",  // ISO 8601 with time
+		"01/02/2006",           // US
+		"02/01/2006",           // EU
+		"2006/01/02",
+		"Jan 2, 2006",
+		"January 2, 2006",
+		"2 Jan 2006",
+		"02-Jan-2006",
+		"2006-01-02 15:04:05",
+	}
+	for _, layout := range layouts {
+		if t, err := time.Parse(layout, s); err == nil {
+			return &t
+		}
+	}
+	return nil
 }
 
 func cleanGeminiJSON(input string) string {

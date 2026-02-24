@@ -59,7 +59,7 @@ paths:
       description: |
         Returns the full receipt with users, items, and assignments (user-item correlation).
         The assignments array links users to items for building the bill split UI - each
-        assignment has user_id, item_id, and optional amount_paid (null = equal split).
+        assignment has user_id, item_id, and amount_paid (computed as equal split among assignees).
       operationId: getReceipt
       parameters:
         - name: receipt_id
@@ -236,8 +236,8 @@ paths:
     post:
       summary: Assign items to user
       description: |
-        Assign receipt items to a user. Optionally specify amount_paid for custom amounts;
-        omit or set to null for equal split based on item prices.
+        Assign receipt items to a user. Amount owed is computed as equal split among
+        all users assigned to each item (see GET receipt for computed amounts).
       operationId: assignItemsToUser
       parameters:
         - name: receipt_id
@@ -376,11 +376,6 @@ components:
           description: Receipt item IDs to assign to this user
           minItems: 1
           example: ["item_abc123", "item_def456"]
-        amount_paid:
-          type: number
-          format: double
-          nullable: true
-          description: Custom amount paid (null = equal split based on item prices)
 
     AssignItemsToUserResponse:
       type: object
@@ -400,10 +395,6 @@ components:
                 type: string
               receipt_item_id:
                 type: string
-              amount_paid:
-                type: number
-                format: double
-                nullable: true
 
     GetReceiptResponse:
       type: object
@@ -430,7 +421,7 @@ components:
             $ref: '#/components/schemas/ReceiptItem'
         assignments:
           type: array
-          description: User-item correlation for bill split (user_id + item_id + amount_paid)
+          description: User-item correlation for bill split. amount_paid is computed as equal split among all users assigned to each item, rounded to whole cents.
           items:
             type: object
             properties:
@@ -446,8 +437,7 @@ components:
               amount_paid:
                 type: number
                 format: double
-                nullable: true
-                description: Custom amount (null = equal split)
+                description: Amount this user owes for this item (equal split among assignees, whole cents)
 
     GetReceiptUsersResponse:
       type: object
