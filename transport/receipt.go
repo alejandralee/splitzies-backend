@@ -1,268 +1,15 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
-	"math"
 	"net/http"
 	"strings"
-	"time"
 
+	"splitzies/money"
 	"splitzies/persistence"
-	"splitzies/storage"
 )
-
-// ReceiptItem represents a single item in a receipt
-type ReceiptItem struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Quantity     int      `json:"quantity"`
-	TotalPrice   *float64 `json:"total_price,omitempty"`    // Optional, can be calculated
-	PricePerItem *float64 `json:"price_per_item,omitempty"` // Optional, can be calculated
-}
-
-// AddReceiptRequest represents the request body for adding a receipt
-type AddReceiptRequest struct {
-	Items []ReceiptItem `json:"items"`
-}
-
-// AddReceiptResponse represents the response after processing a receipt
-type AddReceiptResponse struct {
-	Message  string        `json:"message"`
-	Items    []ReceiptItem `json:"items"`
-	ImageURL *string       `json:"image_url,omitempty"`
-}
-
-// UploadReceiptImageHandler handles receipt image uploads
-// Expects multipart/form-data with:
-//   - "image": the receipt image file
-//
-// Returns the uploaded image URL
-func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
-	// Generate receipt ID first (we'll create a receipt record with just the image)
-	ctx := context.Background()
-	receiptID := persistence.GenerateReceiptID()
-
-	file, contentType, err := t.validateReceiptImageRequest(w, r)
-	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	// Read file data for OCR (we need to read it before uploading)
-	// Reset file position after reading
-	fileData, err := io.ReadAll(file)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read image file: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Upload image to GCS (using the data we just read)
-	imageURL, err := t.gcsClient.UploadReceiptImageFromReader(ctx, bytes.NewReader(fileData), receiptID, contentType)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to upload image: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Perform OCR on the image
-	ocrText, err := t.visionClient.PerformOCRFromBytes(ctx, fileData)
-	var parsedItems []persistence.ReceiptItemDB
-	var ocrTextData *persistence.OCRTextData
-	var currency *string
-	var receiptDate *time.Time
-	var title *string
-	var tax *float64
-	var tip *float64
-
-	if err != nil {
-		// OCR failed - log but don't fail the request
-		// We'll save the receipt without OCR text
-		fmt.Printf("Warning: OCR failed: %v\n", err)
-	} else if ocrText != "" {
-		// Always save OCR text for reference
-		ocrTextData = &persistence.OCRTextData{
-			Text: ocrText,
-		}
-
-		// Try to parse receipt items from OCR text using Gemini
-		parseResult, parseErr := storage.ParseReceiptItemsWithGemini(ctx, ocrText)
-		if parseErr != nil {
-			fmt.Printf("Warning: Gemini parse failed: %v\n", parseErr)
-			parseResult.Items = storage.ExtractReceiptItemsFromText(ocrText)
-			parseResult.Currency = nil
-			parseResult.ReceiptDate = nil
-			parseResult.Title = nil
-			parseResult.Tax = nil
-			parseResult.Tip = nil
-		}
-		currency = parseResult.Currency
-		receiptDate = parseResult.ReceiptDate
-		title = parseResult.Title
-		tax = parseResult.Tax
-		tip = parseResult.Tip
-
-		if len(parseResult.Items) > 0 {
-			// Successfully parsed items - convert to ReceiptItemDB and save them
-			parsedItems = make([]persistence.ReceiptItemDB, len(parseResult.Items))
-			for i, item := range parseResult.Items {
-				parsedItems[i] = persistence.ReceiptItemDB{
-					Name:         item.Name,
-					Quantity:     item.Quantity,
-					TotalPrice:   item.TotalPrice,
-					PricePerItem: item.PricePerItem,
-				}
-			}
-		}
-		// If items couldn't be parsed, we still save the OCR text (already set above)
-	}
-
-	// Save receipt with image URL, parsed items (if any), OCR text, Gemini metadata, and tax/tip if parsed
-	savedReceipt, err := persistence.SaveReceipt(parsedItems, &imageURL, ocrTextData, currency, receiptDate, title, tax, tip)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save receipt: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	// Convert saved receipt items to response format (use savedReceipt.Items which have IDs)
-	responseItems := make([]ReceiptItem, len(savedReceipt.Items))
-	for i, item := range savedReceipt.Items {
-		totalPrice := item.TotalPrice
-		pricePerItem := item.PricePerItem
-		responseItems[i] = ReceiptItem{
-			ID:           item.ID,
-			Name:         item.Name,
-			Quantity:     item.Quantity,
-			TotalPrice:   &totalPrice,
-			PricePerItem: &pricePerItem,
-		}
-	}
-
-	// Return success response
-	response := map[string]interface{}{
-		"message":    fmt.Sprintf("Receipt image uploaded successfully with ID: %s", savedReceipt.ID),
-		"receipt_id": savedReceipt.ID,
-		"image_url":  imageURL,
-		"items":      responseItems,
-	}
-
-	// Include OCR text in response when available (for reference/debugging)
-	if ocrTextData != nil {
-		response["ocr_text"] = ocrTextData.Text
-	}
-
-	// Include tax/tip when parsed from receipt
-	if tax != nil {
-		response["tax"] = *tax
-	}
-	if tip != nil {
-		response["tip"] = *tip
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		// Response already written, can't write error
-		fmt.Printf("Failed to encode response: %v\n", err)
-		return
-	}
-}
-
-func (t *Transport) validateReceiptImageRequest(w http.ResponseWriter, r *http.Request) (file io.ReadCloser, contentType string, err error) {
-	// Only allow POST method
-	if r.Method != http.MethodPost {
-		err = NewInvalidMethodError(r.Method)
-		http.Error(w, err.Error(), http.StatusMethodNotAllowed)
-		return nil, "", err
-	}
-
-	// Parse multipart form (max 10MB)
-	err = r.ParseMultipartForm(10 << 20) // 10MB
-	if err != nil {
-		validationErr := NewValidationError("form", fmt.Sprintf("failed to parse multipart form: %v", err))
-		http.Error(w, validationErr.Error(), http.StatusBadRequest)
-		return nil, "", validationErr
-	}
-
-	// Get the image file from form
-	file, header, err := r.FormFile("image")
-	if err != nil {
-		validationErr := NewValidationError("image", fmt.Sprintf("failed to get image file: %v", err))
-		http.Error(w, validationErr.Error(), http.StatusBadRequest)
-		return nil, "", validationErr
-	}
-
-	// Validate file size (max 10MB)
-	if header.Size > 10<<20 {
-		validationErr := NewValidationError("image", "image file too large (max 10MB)")
-		http.Error(w, validationErr.Error(), http.StatusBadRequest)
-		return nil, "", validationErr
-	}
-
-	// Validate content type
-	contentType = header.Header.Get("Content-Type")
-	if contentType != "" {
-		validTypes := map[string]bool{
-			"image/jpeg": true,
-			"image/jpg":  true,
-			"image/png":  true,
-			"image/gif":  true,
-			"image/webp": true,
-		}
-		if !validTypes[contentType] {
-			validationErr := NewValidationError("image", fmt.Sprintf("invalid image type: %s", contentType))
-			http.Error(w, validationErr.Error(), http.StatusBadRequest)
-			return nil, "", validationErr
-		}
-	}
-	return file, contentType, nil
-}
-
-// AddUserToReceiptRequest represents the request body for adding a user to a receipt
-type AddUserToReceiptRequest struct {
-	Name string `json:"name"`
-}
-
-// AddUserToReceiptResponse represents the response after adding a user to a receipt
-type AddUserToReceiptResponse struct {
-	Message string `json:"message"`
-	User    struct {
-		ID        string `json:"id"`
-		ReceiptID string `json:"receipt_id"`
-		Name      string `json:"name"`
-	} `json:"user"`
-}
-
-// GetReceiptUserResponse represents a user in the get receipt response
-type GetReceiptUserResponse struct {
-	ID        string   `json:"id"`
-	ReceiptID string   `json:"receipt_id"`
-	Name      string   `json:"name"`
-	UserTotal *float64 `json:"user_total,omitempty"`
-}
-
-// GetReceiptUsersResponse represents the response for GET receipt users
-type GetReceiptUsersResponse struct {
-	Users []GetReceiptUserResponse `json:"users"`
-}
-
-// GetReceiptAssignmentResponse represents an assignment in the get receipt response
-type GetReceiptAssignmentResponse struct {
-	ID         string  `json:"id"`
-	UserID     string  `json:"user_id"`
-	ItemID     string  `json:"item_id"`
-	AmountOwed float64 `json:"amount_owed"`
-}
-
-// GetReceiptResponse represents the full get receipt response
-type GetReceiptResponse struct {
-	ReceiptID   string                       `json:"receipt_id"`
-	Users       []GetReceiptUserResponse     `json:"users"`
-	Items       []ReceiptItem                `json:"items"`
-	Assignments []GetReceiptAssignmentResponse `json:"assignments"`
-}
 
 // AddUserToReceiptHandler handles adding a user to a receipt
 // Expects POST /receipts/{receipt_id}/users
@@ -272,20 +19,17 @@ func (t *Transport) AddUserToReceiptHandler(w http.ResponseWriter, r *http.Reque
 		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
 		return
 	}
-
-	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(pathParts) != 3 || pathParts[0] != "receipts" || pathParts[2] != "users" {
+	receiptID, ok := parseReceiptUsersPath(r.URL.Path)
+	if !ok {
 		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
 		return
 	}
-	receiptID := pathParts[1]
 
 	var req AddUserToReceiptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, NewValidationError("body", fmt.Sprintf("failed to parse request body: %v", err)).Error(), http.StatusBadRequest)
 		return
 	}
-
 	if req.Name == "" {
 		http.Error(w, NewValidationError("name", "name is required").Error(), http.StatusBadRequest)
 		return
@@ -316,27 +60,6 @@ func (t *Transport) AddUserToReceiptHandler(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-// AssignItemsToUserRequest represents the request body for assigning items to a user
-type AssignItemsToUserRequest struct {
-	ItemIDs []string `json:"item_ids"`
-}
-
-// AssignItemsToUserResponse represents the response after assigning items to a user
-type AssignItemsToUserResponse struct {
-	Message string `json:"message"`
-	Items   []struct {
-		ID            string `json:"id"`
-		ReceiptUserID string `json:"receipt_user_id"`
-		ReceiptItemID string `json:"receipt_item_id"`
-	} `json:"items"`
-}
-
-// PatchReceiptRequest represents the request body for updating receipt tax/tip
-type PatchReceiptRequest struct {
-	Tax *float64 `json:"tax"`
-	Tip *float64 `json:"tip"`
-}
-
 // PatchReceiptHandler handles updating tax and tip on a receipt (when not parsed from OCR)
 // Expects PATCH /receipts/{receipt_id}
 // Request body: {"tax": 1.50, "tip": 5.00} - both optional
@@ -345,20 +68,17 @@ func (t *Transport) PatchReceiptHandler(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
 		return
 	}
-
-	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(pathParts) != 2 || pathParts[0] != "receipts" {
+	receiptID, ok := parseReceiptIDPath(r.URL.Path)
+	if !ok {
 		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
 		return
 	}
-	receiptID := pathParts[1]
 
 	var req PatchReceiptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, NewValidationError("body", fmt.Sprintf("failed to parse request body: %v", err)).Error(), http.StatusBadRequest)
 		return
 	}
-
 	if req.Tax == nil && req.Tip == nil {
 		http.Error(w, NewValidationError("body", "at least one of tax or tip is required").Error(), http.StatusBadRequest)
 		return
@@ -388,13 +108,11 @@ func (t *Transport) GetReceiptUsersHandler(w http.ResponseWriter, r *http.Reques
 		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
 		return
 	}
-
-	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(pathParts) != 3 || pathParts[0] != "receipts" || pathParts[2] != "users" {
+	receiptID, ok := parseReceiptUsersPath(r.URL.Path)
+	if !ok {
 		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
 		return
 	}
-	receiptID := pathParts[1]
 
 	ctx := context.Background()
 	exists, err := t.persistenceClient.ReceiptExists(ctx, receiptID)
@@ -419,7 +137,7 @@ func (t *Transport) GetReceiptUsersHandler(w http.ResponseWriter, r *http.Reques
 			ID:        u.ID,
 			ReceiptID: u.ReceiptID,
 			Name:      u.Name,
-			UserTotal: nil, // omit for GET users endpoint
+			UserTotal: nil,
 		}
 	}
 
@@ -436,13 +154,11 @@ func (t *Transport) GetReceiptItemsHandler(w http.ResponseWriter, r *http.Reques
 		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
 		return
 	}
-
-	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(pathParts) != 3 || pathParts[0] != "receipts" || pathParts[2] != "items" {
+	receiptID, ok := parseReceiptItemsPath(r.URL.Path)
+	if !ok {
 		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
 		return
 	}
-	receiptID := pathParts[1]
 
 	ctx := context.Background()
 	exists, err := t.persistenceClient.ReceiptExists(ctx, receiptID)
@@ -461,18 +177,12 @@ func (t *Transport) GetReceiptItemsHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	responseItems := make([]ReceiptItem, len(items))
-	for i, item := range items {
-		totalPrice := item.TotalPrice
-		pricePerItem := item.PricePerItem
-		responseItems[i] = ReceiptItem{
-			ID:           item.ID,
-			Name:         item.Name,
-			Quantity:     item.Quantity,
-			TotalPrice:   &totalPrice,
-			PricePerItem: &pricePerItem,
-		}
+	currency, err := t.persistenceClient.GetReceiptCurrency(ctx, receiptID)
+	if err != nil {
+		t.log.Error("Failed to get receipt currency, using USD", "receipt_id", receiptID, "error", err)
+		currency = &defaultUSD
 	}
+	responseItems := itemsToReceiptItems(items, currency)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]interface{}{"items": responseItems}); err != nil {
@@ -488,13 +198,11 @@ func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
 		return
 	}
-
-	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(pathParts) != 2 || pathParts[0] != "receipts" {
+	receiptID, ok := parseReceiptIDPath(r.URL.Path)
+	if !ok {
 		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
 		return
 	}
-	receiptID := pathParts[1]
 
 	ctx := context.Background()
 	exists, err := t.persistenceClient.ReceiptExists(ctx, receiptID)
@@ -512,103 +220,25 @@ func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("Failed to get receipt users: %v", err), http.StatusInternalServerError)
 		return
 	}
-
 	items, err := t.persistenceClient.GetReceiptItems(ctx, receiptID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get receipt items: %v", err), http.StatusInternalServerError)
 		return
 	}
-
 	assignments, err := t.persistenceClient.GetReceiptAssignments(ctx, receiptID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get receipt assignments: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Build item ID -> total price map
-	itemPrice := make(map[string]float64)
-	for _, item := range items {
-		itemPrice[item.ID] = item.TotalPrice
+	currency, err := t.persistenceClient.GetReceiptCurrency(ctx, receiptID)
+	if err != nil {
+		t.log.Error("Failed to get receipt currency, using USD", "receipt_id", receiptID, "error", err)
+		currency = &defaultUSD
 	}
 
-	// Build item ID -> ordered list of (user_id, assignment) for equal split
-	// Each user assigned to an item gets 1/n of the total, rounded to cents
-	itemUserOrder := make(map[string][]string)
-	for _, a := range assignments {
-		itemUserOrder[a.ReceiptItemID] = append(itemUserOrder[a.ReceiptItemID], a.ReceiptUserID)
-	}
-
-	// Compute amount for each (user_id, item_id) pair
-	amountByUserItem := make(map[string]float64)
-	for itemID, userIDs := range itemUserOrder {
-		totalPrice := itemPrice[itemID]
-		n := len(userIDs)
-		if n == 0 {
-			continue
-		}
-		totalCents := int(math.Round(totalPrice * 100))
-		baseCents := totalCents / n
-		remainder := totalCents - baseCents*n
-		for i, userID := range userIDs {
-			cents := baseCents
-			if i < remainder {
-				cents++
-			}
-			key := userID + ":" + itemID
-			amountByUserItem[key] = float64(cents) / 100
-		}
-	}
-
-	// Compute user total (sum of amount_owed across all assigned items per user)
-	userTotal := make(map[string]float64)
-	for _, a := range assignments {
-		key := a.ReceiptUserID + ":" + a.ReceiptItemID
-		userTotal[a.ReceiptUserID] += amountByUserItem[key]
-	}
-
-	// Build response - assignments provide the user-item correlation for bill split
-	responseUsers := make([]GetReceiptUserResponse, len(users))
-	for i, u := range users {
-		total := userTotal[u.ID]
-		responseUsers[i] = GetReceiptUserResponse{
-			ID:        u.ID,
-			ReceiptID: u.ReceiptID,
-			Name:      u.Name,
-			UserTotal: &total,
-		}
-	}
-
-	responseItems := make([]ReceiptItem, len(items))
-	for i, item := range items {
-		totalPrice := item.TotalPrice
-		pricePerItem := item.PricePerItem
-		responseItems[i] = ReceiptItem{
-			ID:           item.ID,
-			Name:         item.Name,
-			Quantity:     item.Quantity,
-			TotalPrice:   &totalPrice,
-			PricePerItem: &pricePerItem,
-		}
-	}
-
-	responseAssignments := make([]GetReceiptAssignmentResponse, len(assignments))
-	for i, a := range assignments {
-		key := a.ReceiptUserID + ":" + a.ReceiptItemID
-		amount := amountByUserItem[key]
-		responseAssignments[i] = GetReceiptAssignmentResponse{
-			ID:         a.ID,
-			UserID:     a.ReceiptUserID,
-			ItemID:     a.ReceiptItemID,
-			AmountOwed: amount,
-		}
-	}
-
-	response := GetReceiptResponse{
-		ReceiptID:   receiptID,
-		Users:       responseUsers,
-		Items:       responseItems,
-		Assignments: responseAssignments,
-	}
+	split := ComputeBillSplit(items, assignments)
+	response := ToGetReceiptResponse(receiptID, users, items, assignments, split, currency)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
@@ -623,30 +253,23 @@ func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Requ
 		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
 		return
 	}
-
-	pathParts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
-	if len(pathParts) != 5 || pathParts[0] != "receipts" || pathParts[2] != "users" || pathParts[4] != "items" {
+	userID, ok := parseReceiptUserItemsPath(r.URL.Path)
+	if !ok {
 		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
 		return
 	}
-	userID := pathParts[3]
 
 	var req AssignItemsToUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, NewValidationError("body", fmt.Sprintf("failed to parse request body: %v", err)).Error(), http.StatusBadRequest)
 		return
 	}
-
 	if len(req.ItemIDs) == 0 {
 		http.Error(w, NewValidationError("item_ids", "at least one item_id is required").Error(), http.StatusBadRequest)
 		return
 	}
 
-	assignedItems := make([]struct {
-		ID            string `json:"id"`
-		ReceiptUserID string `json:"receipt_user_id"`
-		ReceiptItemID string `json:"receipt_item_id"`
-	}, 0, len(req.ItemIDs))
+	assignedItems := make([]AssignItemsToUserItem, 0, len(req.ItemIDs))
 
 	ctx := context.Background()
 	for _, itemID := range req.ItemIDs {
@@ -659,12 +282,7 @@ func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Requ
 			http.Error(w, fmt.Sprintf("Failed to assign item %s to user: %v", itemID, err), http.StatusInternalServerError)
 			return
 		}
-
-		assignedItems = append(assignedItems, struct {
-			ID            string `json:"id"`
-			ReceiptUserID string `json:"receipt_user_id"`
-			ReceiptItemID string `json:"receipt_item_id"`
-		}{
+		assignedItems = append(assignedItems, AssignItemsToUserItem{
 			ID:            assignment.ID,
 			ReceiptUserID: assignment.ReceiptUserID,
 			ReceiptItemID: assignment.ReceiptItemID,
@@ -681,4 +299,18 @@ func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Requ
 	if err := json.NewEncoder(w).Encode(response); err != nil {
 		fmt.Printf("Failed to encode response: %v\n", err)
 	}
+}
+
+func itemsToReceiptItems(items []persistence.ReceiptItem, currency *string) []ReceiptItem {
+	result := make([]ReceiptItem, len(items))
+	for i, item := range items {
+		result[i] = ReceiptItem{
+			ID:           item.ID,
+			Name:         item.Name,
+			Quantity:     item.Quantity,
+			TotalPrice:   money.Ptr(&item.TotalPrice, currency),
+			PricePerItem: money.Ptr(&item.PricePerItem, currency),
+		}
+	}
+	return result
 }
