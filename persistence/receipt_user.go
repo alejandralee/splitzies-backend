@@ -22,7 +22,7 @@ type ReceiptUserItem struct {
 	ID            string
 	ReceiptUserID string
 	ReceiptItemID string
-	AmountPaid    *float64 // NULL means equal split, non-NULL means custom amount
+	AmountOwed    *float64 // NULL means equal split, non-NULL means custom amount
 	CreatedAt     time.Time
 }
 
@@ -81,10 +81,10 @@ func (c *Client) AssignItemToUser(ctx context.Context, receiptUserID, receiptIte
 	// Insert assignment (or update if exists due to unique constraint)
 	// Foreign key constraints will fail if user or item doesn't exist
 	_, err = c.db.Exec(ctx, `
-		INSERT INTO receipt_user_items (id, receipt_user_id, receipt_item_id, amount_paid, created_at)
+		INSERT INTO receipt_user_items (id, receipt_user_id, receipt_item_id, amount_owed, created_at)
 		VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
 		ON CONFLICT (receipt_user_id, receipt_item_id) 
-		DO UPDATE SET amount_paid = EXCLUDED.amount_paid
+		DO UPDATE SET amount_owed = EXCLUDED.amount_owed
 	`, assignmentID, receiptUserID, receiptItemID, amountPaid)
 	if err != nil {
 		// Check if it's a foreign key violation
@@ -94,9 +94,9 @@ func (c *Client) AssignItemToUser(ctx context.Context, receiptUserID, receiptIte
 		return nil, fmt.Errorf("failed to assign item to user: %w", err)
 	}
 
-	// Get amount_paid (for conflict case where it might have been updated)
-	var dbAmountPaid *float64
-	err = c.db.QueryRow(ctx, "SELECT amount_paid FROM receipt_user_items WHERE id = $1", assignmentID).Scan(&dbAmountPaid)
+	// Get amount_owed (for conflict case where it might have been updated)
+	var dbAmountOwed *float64
+	err = c.db.QueryRow(ctx, "SELECT amount_owed FROM receipt_user_items WHERE id = $1", assignmentID).Scan(&dbAmountOwed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get receipt user item data: %w", err)
 	}
@@ -105,7 +105,7 @@ func (c *Client) AssignItemToUser(ctx context.Context, receiptUserID, receiptIte
 		ID:            assignmentID,
 		ReceiptUserID: receiptUserID,
 		ReceiptItemID: receiptItemID,
-		AmountPaid:    dbAmountPaid,
+		AmountOwed:    dbAmountOwed,
 		// CreatedAt is kept in DB but not surfaced in responses
 	}
 
@@ -234,7 +234,7 @@ func (c *Client) GetReceiptItems(ctx context.Context, receiptID string) ([]Recei
 // GetReceiptAssignments gets all user-item assignments for a receipt
 func (c *Client) GetReceiptAssignments(ctx context.Context, receiptID string) ([]ReceiptUserItem, error) {
 	rows, err := c.db.Query(ctx, `
-		SELECT rui.id, rui.receipt_user_id, rui.receipt_item_id, rui.amount_paid, rui.created_at
+		SELECT rui.id, rui.receipt_user_id, rui.receipt_item_id, rui.amount_owed, rui.created_at
 		FROM receipt_user_items rui
 		JOIN receipt_users ru ON ru.id = rui.receipt_user_id
 		WHERE ru.receipt_id = $1
@@ -248,7 +248,7 @@ func (c *Client) GetReceiptAssignments(ctx context.Context, receiptID string) ([
 	assignments := make([]ReceiptUserItem, 0)
 	for rows.Next() {
 		var a ReceiptUserItem
-		err := rows.Scan(&a.ID, &a.ReceiptUserID, &a.ReceiptItemID, &a.AmountPaid, &a.CreatedAt)
+		err := rows.Scan(&a.ID, &a.ReceiptUserID, &a.ReceiptItemID, &a.AmountOwed, &a.CreatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan receipt assignment: %w", err)
 		}
@@ -265,7 +265,7 @@ func (c *Client) GetReceiptAssignments(ctx context.Context, receiptID string) ([
 // GetUserItems gets all items assigned to a user
 func (c *Client) GetUserItems(ctx context.Context, receiptUserID string) ([]ReceiptUserItem, error) {
 	rows, err := c.db.Query(ctx, `
-		SELECT id, receipt_user_id, receipt_item_id, amount_paid, created_at
+		SELECT id, receipt_user_id, receipt_item_id, amount_owed, created_at
 		FROM receipt_user_items
 		WHERE receipt_user_id = $1
 		ORDER BY created_at ASC
@@ -278,7 +278,7 @@ func (c *Client) GetUserItems(ctx context.Context, receiptUserID string) ([]Rece
 	items := make([]ReceiptUserItem, 0)
 	for rows.Next() {
 		var item ReceiptUserItem
-		err := rows.Scan(&item.ID, &item.ReceiptUserID, &item.ReceiptItemID, &item.AmountPaid, &item.CreatedAt)
+		err := rows.Scan(&item.ID, &item.ReceiptUserID, &item.ReceiptItemID, &item.AmountOwed, &item.CreatedAt)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan user item: %w", err)
 		}

@@ -235,6 +235,35 @@ type AddUserToReceiptResponse struct {
 	} `json:"user"`
 }
 
+// GetReceiptUserResponse represents a user in the get receipt response
+type GetReceiptUserResponse struct {
+	ID        string   `json:"id"`
+	ReceiptID string   `json:"receipt_id"`
+	Name      string   `json:"name"`
+	UserTotal *float64 `json:"user_total,omitempty"`
+}
+
+// GetReceiptUsersResponse represents the response for GET receipt users
+type GetReceiptUsersResponse struct {
+	Users []GetReceiptUserResponse `json:"users"`
+}
+
+// GetReceiptAssignmentResponse represents an assignment in the get receipt response
+type GetReceiptAssignmentResponse struct {
+	ID         string  `json:"id"`
+	UserID     string  `json:"user_id"`
+	ItemID     string  `json:"item_id"`
+	AmountOwed float64 `json:"amount_owed"`
+}
+
+// GetReceiptResponse represents the full get receipt response
+type GetReceiptResponse struct {
+	ReceiptID   string                       `json:"receipt_id"`
+	Users       []GetReceiptUserResponse     `json:"users"`
+	Items       []ReceiptItem                `json:"items"`
+	Assignments []GetReceiptAssignmentResponse `json:"assignments"`
+}
+
 // AddUserToReceiptHandler handles adding a user to a receipt
 // Expects POST /receipts/{receipt_id}/users
 // Request body: {"name": "John Doe"}
@@ -384,17 +413,18 @@ func (t *Transport) GetReceiptUsersHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	responseUsers := make([]map[string]interface{}, len(users))
+	responseUsers := make([]GetReceiptUserResponse, len(users))
 	for i, u := range users {
-		responseUsers[i] = map[string]interface{}{
-			"id":         u.ID,
-			"receipt_id": u.ReceiptID,
-			"name":       u.Name,
+		responseUsers[i] = GetReceiptUserResponse{
+			ID:        u.ID,
+			ReceiptID: u.ReceiptID,
+			Name:      u.Name,
+			UserTotal: nil, // omit for GET users endpoint
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]interface{}{"users": responseUsers}); err != nil {
+	if err := json.NewEncoder(w).Encode(GetReceiptUsersResponse{Users: responseUsers}); err != nil {
 		fmt.Printf("Failed to encode response: %v\n", err)
 	}
 }
@@ -529,13 +559,22 @@ func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Compute user total (sum of amount_owed across all assigned items per user)
+	userTotal := make(map[string]float64)
+	for _, a := range assignments {
+		key := a.ReceiptUserID + ":" + a.ReceiptItemID
+		userTotal[a.ReceiptUserID] += amountByUserItem[key]
+	}
+
 	// Build response - assignments provide the user-item correlation for bill split
-	responseUsers := make([]map[string]interface{}, len(users))
+	responseUsers := make([]GetReceiptUserResponse, len(users))
 	for i, u := range users {
-		responseUsers[i] = map[string]interface{}{
-			"id":         u.ID,
-			"receipt_id": u.ReceiptID,
-			"name":       u.Name,
+		total := userTotal[u.ID]
+		responseUsers[i] = GetReceiptUserResponse{
+			ID:        u.ID,
+			ReceiptID: u.ReceiptID,
+			Name:      u.Name,
+			UserTotal: &total,
 		}
 	}
 
@@ -552,23 +591,23 @@ func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	responseAssignments := make([]map[string]interface{}, len(assignments))
+	responseAssignments := make([]GetReceiptAssignmentResponse, len(assignments))
 	for i, a := range assignments {
 		key := a.ReceiptUserID + ":" + a.ReceiptItemID
 		amount := amountByUserItem[key]
-		responseAssignments[i] = map[string]interface{}{
-			"id":             a.ID,
-			"user_id":        a.ReceiptUserID,
-			"item_id":        a.ReceiptItemID,
-			"amount_paid":    amount,
+		responseAssignments[i] = GetReceiptAssignmentResponse{
+			ID:         a.ID,
+			UserID:     a.ReceiptUserID,
+			ItemID:     a.ReceiptItemID,
+			AmountOwed: amount,
 		}
 	}
 
-	response := map[string]interface{}{
-		"receipt_id":  receiptID,
-		"users":       responseUsers,
-		"items":       responseItems,
-		"assignments": responseAssignments,
+	response := GetReceiptResponse{
+		ReceiptID:   receiptID,
+		Users:       responseUsers,
+		Items:       responseItems,
+		Assignments: responseAssignments,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
