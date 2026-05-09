@@ -32,11 +32,6 @@ cloud.google.com/go/auth/oauth2adapt
 # cloud.google.com/go/compute/metadata v0.7.0
 ## explicit; go 1.23.0
 cloud.google.com/go/compute/metadata
-# cloud.google.com/go/documentai v1.38.0
-## explicit; go 1.23.0
-cloud.google.com/go/documentai/apiv1
-cloud.google.com/go/documentai/apiv1/documentaipb
-cloud.google.com/go/documentai/internal
 # cloud.google.com/go/iam v1.5.2
 ## explicit; go 1.23.0
 cloud.google.com/go/iam
@@ -408,17 +403,13 @@ google.golang.org/api/transport/http
 google.golang.org/genai
 # google.golang.org/genproto v0.0.0-20250603155806-513f23925822
 ## explicit; go 1.23.0
-google.golang.org/genproto/googleapis/cloud/location
 google.golang.org/genproto/googleapis/cloud/vision/v1
 google.golang.org/genproto/googleapis/longrunning
 google.golang.org/genproto/googleapis/type/calendarperiod
 google.golang.org/genproto/googleapis/type/color
 google.golang.org/genproto/googleapis/type/date
-google.golang.org/genproto/googleapis/type/datetime
 google.golang.org/genproto/googleapis/type/expr
 google.golang.org/genproto/googleapis/type/latlng
-google.golang.org/genproto/googleapis/type/money
-google.golang.org/genproto/googleapis/type/postaladdress
 google.golang.org/genproto/googleapis/type/timeofday
 # google.golang.org/genproto/googleapis/api v0.0.0-20250804133106-a7a43d27e69b
 ## explicit; go 1.23.0

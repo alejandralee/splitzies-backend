@@ -42,10 +42,14 @@ func NewGCSClient(ctx context.Context) (*GCSClient, error) {
 
 func (c *GCSClient) UploadReceiptImageFromReader(ctx context.Context, reader io.Reader, receiptID string, contentType string) (string, error) {
 	bucket := c.client.Bucket(c.bucketName)
-	object := bucket.Object(getObjectName(receiptID, contentType))
+	objectName := getObjectName(receiptID, contentType)
+	object := bucket.Object(objectName)
 
 	writer := object.NewWriter(ctx)
 	writer.ContentType = contentType
+	if writer.ContentType == "" {
+		writer.ContentType = "image/jpeg"
+	}
 	writer.Metadata = map[string]string{
 		"receipt_id":  receiptID,
 		"uploaded_at": time.Now().Format(time.RFC3339),
