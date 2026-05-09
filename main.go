@@ -90,8 +90,8 @@ func main() {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	allowedOrigins := map[string]struct{}{
-		"https://preview-sandbox--69b99817fffd276b869a4db1.base44.app": {},
-		"https://splitzies.base44.app":                                  {},
+		"https://preview--splitly-easy-bills.base44.app": {},
+		"https://splitzies.base44.app":                   {},
 	}
 
 	// Allow localhost origins only in development to prevent any local dev server
