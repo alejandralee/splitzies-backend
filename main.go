@@ -90,10 +90,15 @@ func main() {
 
 func corsMiddleware(next http.Handler) http.Handler {
 	allowedOrigins := map[string]struct{}{
-		"http://localhost:3000": {},
-		"http://localhost:5173": {},
 		"https://preview-sandbox--69b99817fffd276b869a4db1.base44.app": {},
 		"https://splitzies.base44.app":                                  {},
+	}
+
+	// Allow localhost origins only in development to prevent any local dev server
+	// from being able to make CORS requests against the production API.
+	if os.Getenv("ENV") == "development" || os.Getenv("ENV") == "dev" {
+		allowedOrigins["http://localhost:3000"] = struct{}{}
+		allowedOrigins["http://localhost:5173"] = struct{}{}
 	}
 
 	if extra := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS")); extra != "" {
@@ -109,11 +114,13 @@ func corsMiddleware(next http.Handler) http.Handler {
 		if _, ok := allowedOrigins[origin]; ok && origin != "" {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
-			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
 		}
 
 		if r.Method == http.MethodOptions {
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+			w.Header().Set("Access-Control-Max-Age", "600")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
