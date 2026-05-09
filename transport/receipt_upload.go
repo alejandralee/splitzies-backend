@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -14,7 +13,64 @@ import (
 	"splitzies/storage"
 )
 
-// ocrParseResult holds the result of parsing OCR text for a receipt
+// UploadReceiptImageHandler handles POST /receipts/image
+func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	rid := requestID(r)
+
+	file, contentType, err := t.validateReceiptImageRequest(w, r)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	fileData, err := io.ReadAll(file)
+	if err != nil {
+		t.log.Error("failed to read receipt image", "request_id", rid, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "receipt_image_read_failed", "failed to read receipt image", rid)
+		return
+	}
+
+	imageURL, err := t.gcsClient.UploadReceiptImageFromReader(ctx, bytes.NewReader(fileData), persistence.GenerateReceiptID(), contentType)
+	if err != nil {
+		t.log.Error("failed to upload receipt image", "request_id", rid, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "receipt_image_upload_failed", "failed to upload receipt image", rid)
+		return
+	}
+
+	var (
+		parsedItems []persistence.ReceiptItemDB
+		ocrTextData *persistence.OCRTextData
+		currency    *string
+		receiptDate *time.Time
+		title       *string
+		tax, tip    *float64
+	)
+	if ocr := t.parseOCRForReceipt(ctx, fileData); ocr != nil {
+		parsedItems = ocr.items
+		ocrTextData = ocr.ocrTextData
+		currency = ocr.currency
+		receiptDate = ocr.receiptDate
+		title = ocr.title
+		tax = ocr.tax
+		tip = ocr.tip
+	}
+
+	savedReceipt, err := t.persistenceClient.SaveReceipt(ctx, parsedItems, &imageURL, ocrTextData, currency, receiptDate, title, tax, tip)
+	if err != nil {
+		t.log.Error("failed to save receipt", "request_id", rid, "image_url", imageURL, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "receipt_save_failed", "failed to save receipt", rid)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	if err := json.NewEncoder(w).Encode(buildUploadReceiptResponse(savedReceipt, imageURL, ocrTextData, currency, tax, tip)); err != nil {
+		t.log.Error("failed to encode upload receipt response", "request_id", rid, "error", err)
+	}
+}
+
+// ocrParseResult holds the result of parsing OCR text from a receipt image.
 type ocrParseResult struct {
 	items       []persistence.ReceiptItemDB
 	ocrTextData *persistence.OCRTextData
@@ -25,8 +81,8 @@ type ocrParseResult struct {
 	tip         *float64
 }
 
-// parseOCRForReceipt performs OCR on image data and parses the result using Gemini.
-// Returns nil for ocrTextData and items if OCR fails or text is empty.
+// parseOCRForReceipt performs OCR on the image bytes then parses the result with Gemini.
+// Returns nil if OCR produces no text; falls back to regex parsing if Gemini fails.
 func (t *Transport) parseOCRForReceipt(ctx context.Context, fileData []byte) *ocrParseResult {
 	ocrText, err := t.visionClient.PerformOCRFromBytes(ctx, fileData)
 	if err != nil {
@@ -41,26 +97,21 @@ func (t *Transport) parseOCRForReceipt(ctx context.Context, fileData []byte) *oc
 		ocrTextData: &persistence.OCRTextData{Text: ocrText},
 	}
 
-	parseResult, parseErr := storage.ParseReceiptItemsWithGemini(ctx, ocrText)
+	parsed, parseErr := storage.ParseReceiptItemsWithGemini(ctx, ocrText)
 	if parseErr != nil {
-		t.log.Error("Gemini parse failed", "error", parseErr)
-		parseResult.Items = storage.ExtractReceiptItemsFromText(ocrText)
-		parseResult.Currency = nil
-		parseResult.ReceiptDate = nil
-		parseResult.Title = nil
-		parseResult.Tax = nil
-		parseResult.Tip = nil
+		t.log.Error("Gemini parse failed, falling back to regex", "error", parseErr)
+		parsed.Items = storage.ExtractReceiptItemsFromText(ocrText)
 	}
 
-	result.currency = parseResult.Currency
-	result.receiptDate = parseResult.ReceiptDate
-	result.title = parseResult.Title
-	result.tax = parseResult.Tax
-	result.tip = parseResult.Tip
+	result.currency = parsed.Currency
+	result.receiptDate = parsed.ReceiptDate
+	result.title = parsed.Title
+	result.tax = parsed.Tax
+	result.tip = parsed.Tip
 
-	if len(parseResult.Items) > 0 {
-		result.items = make([]persistence.ReceiptItemDB, len(parseResult.Items))
-		for i, item := range parseResult.Items {
+	if len(parsed.Items) > 0 {
+		result.items = make([]persistence.ReceiptItemDB, len(parsed.Items))
+		for i, item := range parsed.Items {
 			result.items[i] = persistence.ReceiptItemDB{
 				Name:         item.Name,
 				Quantity:     item.Quantity,
@@ -73,62 +124,49 @@ func (t *Transport) parseOCRForReceipt(ctx context.Context, fileData []byte) *oc
 	return result
 }
 
-// UploadReceiptImageHandler handles receipt image uploads
-// Expects multipart/form-data with:
-//   - "image": the receipt image file
-//
-// Returns the uploaded image URL
-func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
-	ctx := context.Background()
-	receiptID := persistence.GenerateReceiptID()
+func (t *Transport) validateReceiptImageRequest(w http.ResponseWriter, r *http.Request) (io.ReadCloser, string, error) {
+	rid := requestID(r)
 
-	file, contentType, err := t.validateReceiptImageRequest(w, r)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		t.log.Warn("failed to parse multipart form", "request_id", rid, "error", err)
+		writeJSONError(w, http.StatusBadRequest, "invalid_multipart_form", "failed to parse multipart form", rid)
+		return nil, "", err
+	}
+
+	file, header, err := r.FormFile("image")
 	if err != nil {
-		return
-	}
-	defer file.Close()
-
-	fileData, err := io.ReadAll(file)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to read image file: %v", err), http.StatusInternalServerError)
-		return
+		t.log.Warn("missing or invalid image file", "request_id", rid, "error", err)
+		writeJSONError(w, http.StatusBadRequest, "missing_image_file", newValidationError("image", "image file is required").Error(), rid)
+		return nil, "", err
 	}
 
-	imageURL, err := t.gcsClient.UploadReceiptImageFromReader(ctx, bytes.NewReader(fileData), receiptID, contentType)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to upload image: %v", err), http.StatusInternalServerError)
-		return
+	if header.Size > 10<<20 {
+		file.Close()
+		err = newValidationError("image", "image file too large (max 10MB)")
+		t.log.Warn("receipt image too large", "request_id", rid, "size_bytes", header.Size)
+		writeJSONError(w, http.StatusBadRequest, "image_too_large", err.Error(), rid)
+		return nil, "", err
 	}
 
-	var parsedItems []persistence.ReceiptItemDB
-	var ocrTextData *persistence.OCRTextData
-	var currency, title *string
-	var receiptDate *time.Time
-	var tax, tip *float64
-
-	if ocr := t.parseOCRForReceipt(ctx, fileData); ocr != nil {
-		parsedItems = ocr.items
-		ocrTextData = ocr.ocrTextData
-		currency = ocr.currency
-		receiptDate = ocr.receiptDate
-		title = ocr.title
-		tax = ocr.tax
-		tip = ocr.tip
+	ct := header.Header.Get("Content-Type")
+	if ct != "" {
+		validTypes := map[string]bool{
+			"image/jpeg": true,
+			"image/jpg":  true,
+			"image/png":  true,
+			"image/gif":  true,
+			"image/webp": true,
+		}
+		if !validTypes[ct] {
+			file.Close()
+			err = newValidationError("image", "unsupported image type "+ct+" (accepted: jpeg, png, gif, webp)")
+			t.log.Warn("invalid image content type", "request_id", rid, "content_type", ct)
+			writeJSONError(w, http.StatusBadRequest, "invalid_image_type", err.Error(), rid)
+			return nil, "", err
+		}
 	}
 
-	savedReceipt, err := persistence.SaveReceipt(parsedItems, &imageURL, ocrTextData, currency, receiptDate, title, tax, tip)
-	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to save receipt: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	response := buildUploadReceiptResponse(savedReceipt, imageURL, ocrTextData, currency, tax, tip)
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		fmt.Printf("Failed to encode response: %v\n", err)
-	}
+	return file, ct, nil
 }
 
 func buildUploadReceiptResponse(savedReceipt *persistence.Receipt, imageURL string, ocrTextData *persistence.OCRTextData, currency *string, tax, tip *float64) UploadReceiptResponse {
@@ -162,47 +200,11 @@ func buildUploadReceiptResponse(savedReceipt *persistence.Receipt, imageURL stri
 	return response
 }
 
-func (t *Transport) validateReceiptImageRequest(w http.ResponseWriter, r *http.Request) (file io.ReadCloser, contentType string, err error) {
-	if r.Method != http.MethodPost {
-		err = NewInvalidMethodError(r.Method)
-		http.Error(w, err.Error(), http.StatusMethodNotAllowed)
-		return nil, "", err
-	}
-
-	err = r.ParseMultipartForm(10 << 20) // 10MB
-	if err != nil {
-		validationErr := NewValidationError("form", fmt.Sprintf("failed to parse multipart form: %v", err))
-		http.Error(w, validationErr.Error(), http.StatusBadRequest)
-		return nil, "", validationErr
-	}
-
-	file, header, err := r.FormFile("image")
-	if err != nil {
-		validationErr := NewValidationError("image", fmt.Sprintf("failed to get image file: %v", err))
-		http.Error(w, validationErr.Error(), http.StatusBadRequest)
-		return nil, "", validationErr
-	}
-
-	if header.Size > 10<<20 {
-		validationErr := NewValidationError("image", "image file too large (max 10MB)")
-		http.Error(w, validationErr.Error(), http.StatusBadRequest)
-		return nil, "", validationErr
-	}
-
-	contentType = header.Header.Get("Content-Type")
-	if contentType != "" {
-		validTypes := map[string]bool{
-			"image/jpeg": true,
-			"image/jpg":  true,
-			"image/png":  true,
-			"image/gif":  true,
-			"image/webp": true,
-		}
-		if !validTypes[contentType] {
-			validationErr := NewValidationError("image", fmt.Sprintf("invalid image type: %s", contentType))
-			http.Error(w, validationErr.Error(), http.StatusBadRequest)
-			return nil, "", validationErr
+func requestID(r *http.Request) string {
+	for _, h := range []string{"X-Request-Id", "X-Request-ID", "Request-Id"} {
+		if v := r.Header.Get(h); v != "" {
+			return v
 		}
 	}
-	return file, contentType, nil
+	return ""
 }

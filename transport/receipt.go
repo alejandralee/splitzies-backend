@@ -1,7 +1,6 @@
 package transport
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,123 +10,95 @@ import (
 	"splitzies/persistence"
 )
 
-// AddUserToReceiptHandler handles adding a user to a receipt
-// Expects POST /receipts/{receipt_id}/users
-// Request body: {"name": "John Doe"}
+// AddUserToReceiptHandler handles POST /receipts/{receipt_id}/users
 func (t *Transport) AddUserToReceiptHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
-		return
-	}
-	receiptID, ok := parseReceiptUsersPath(r.URL.Path)
-	if !ok {
-		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
-		return
-	}
+	receiptID := r.PathValue("receipt_id")
 
 	var req AddUserToReceiptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, NewValidationError("body", fmt.Sprintf("failed to parse request body: %v", err)).Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", "failed to parse request body", "")
 		return
 	}
 	if req.Name == "" {
-		http.Error(w, NewValidationError("name", "name is required").Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing_field", newValidationError("name", "name is required").Error(), "")
 		return
 	}
 
-	ctx := context.Background()
-	user, err := t.persistenceClient.AddUserToReceipt(ctx, receiptID, req.Name)
+	user, err := t.persistenceClient.AddUserToReceipt(r.Context(), receiptID, req.Name)
 	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			http.Error(w, err.Error(), http.StatusNotFound)
+		t.log.Error("failed to add user to receipt", "receipt_id", receiptID, "error", err)
+		if isNotFound(err) {
+			writeJSONError(w, http.StatusNotFound, "receipt_not_found", fmt.Sprintf("receipt %q not found", receiptID), "")
 			return
 		}
-		http.Error(w, fmt.Sprintf("Failed to add user to receipt: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "add_user_failed", "failed to add user to receipt", "")
 		return
 	}
-
-	response := AddUserToReceiptResponse{
-		Message: "User added to receipt successfully",
-	}
-	response.User.ID = user.ID
-	response.User.ReceiptID = user.ReceiptID
-	response.User.Name = user.Name
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		fmt.Printf("Failed to encode response: %v\n", err)
+	if err := json.NewEncoder(w).Encode(AddUserToReceiptResponse{
+		Message: "user added to receipt successfully",
+		User: struct {
+			ID        string `json:"id"`
+			ReceiptID string `json:"receipt_id"`
+			Name      string `json:"name"`
+		}{ID: user.ID, ReceiptID: user.ReceiptID, Name: user.Name},
+	}); err != nil {
+		t.log.Error("failed to encode add user response", "error", err)
 	}
 }
 
-// PatchReceiptHandler handles updating tax and tip on a receipt (when not parsed from OCR)
-// Expects PATCH /receipts/{receipt_id}
-// Request body: {"tax": 1.50, "tip": 5.00} - both optional
+// PatchReceiptHandler handles PATCH /receipts/{receipt_id}
 func (t *Transport) PatchReceiptHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPatch {
-		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
-		return
-	}
-	receiptID, ok := parseReceiptIDPath(r.URL.Path)
-	if !ok {
-		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
-		return
-	}
+	receiptID := r.PathValue("receipt_id")
 
 	var req PatchReceiptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, NewValidationError("body", fmt.Sprintf("failed to parse request body: %v", err)).Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", "failed to parse request body", "")
 		return
 	}
 	if req.Tax == nil && req.Tip == nil {
-		http.Error(w, NewValidationError("body", "at least one of tax or tip is required").Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing_field", "at least one of tax or tip is required", "")
 		return
 	}
 
-	ctx := context.Background()
-	err := t.persistenceClient.UpdateReceiptTaxTip(ctx, receiptID, req.Tax, req.Tip)
-	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
-			http.Error(w, err.Error(), http.StatusNotFound)
+	if err := t.persistenceClient.UpdateReceiptTaxTip(r.Context(), receiptID, req.Tax, req.Tip); err != nil {
+		t.log.Error("failed to update receipt tax/tip", "receipt_id", receiptID, "error", err)
+		if isNotFound(err) {
+			writeJSONError(w, http.StatusNotFound, "receipt_not_found", fmt.Sprintf("receipt %q not found", receiptID), "")
 			return
 		}
-		http.Error(w, fmt.Sprintf("Failed to update receipt: %v", err), http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "update_receipt_failed", "failed to update receipt", "")
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]interface{}{"message": "Receipt updated successfully"}); err != nil {
-		fmt.Printf("Failed to encode response: %v\n", err)
+	if err := json.NewEncoder(w).Encode(map[string]string{"message": "receipt updated successfully"}); err != nil {
+		t.log.Error("failed to encode patch receipt response", "error", err)
 	}
 }
 
-// GetReceiptUsersHandler handles getting users for a receipt
-// Expects GET /receipts/{receipt_id}/users
+// GetReceiptUsersHandler handles GET /receipts/{receipt_id}/users
 func (t *Transport) GetReceiptUsersHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
-		return
-	}
-	receiptID, ok := parseReceiptUsersPath(r.URL.Path)
-	if !ok {
-		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
-		return
-	}
+	receiptID := r.PathValue("receipt_id")
+	ctx := r.Context()
 
-	ctx := context.Background()
 	exists, err := t.persistenceClient.ReceiptExists(ctx, receiptID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to check receipt: %v", err), http.StatusInternalServerError)
+		t.log.Error("failed to check receipt existence", "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to check receipt", "")
 		return
 	}
 	if !exists {
-		http.Error(w, "receipt not found", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "receipt_not_found", fmt.Sprintf("receipt %q not found", receiptID), "")
 		return
 	}
 
 	users, err := t.persistenceClient.GetReceiptUsers(ctx, receiptID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get receipt users: %v", err), http.StatusInternalServerError)
+		t.log.Error("failed to get receipt users", "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to get receipt users", "")
 		return
 	}
 
@@ -137,103 +108,88 @@ func (t *Transport) GetReceiptUsersHandler(w http.ResponseWriter, r *http.Reques
 			ID:        u.ID,
 			ReceiptID: u.ReceiptID,
 			Name:      u.Name,
-			UserTotal: nil,
 		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(GetReceiptUsersResponse{Users: responseUsers}); err != nil {
-		fmt.Printf("Failed to encode response: %v\n", err)
+		t.log.Error("failed to encode receipt users response", "error", err)
 	}
 }
 
-// GetReceiptItemsHandler handles getting items for a receipt
-// Expects GET /receipts/{receipt_id}/items
+// GetReceiptItemsHandler handles GET /receipts/{receipt_id}/items
 func (t *Transport) GetReceiptItemsHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
-		return
-	}
-	receiptID, ok := parseReceiptItemsPath(r.URL.Path)
-	if !ok {
-		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
-		return
-	}
+	receiptID := r.PathValue("receipt_id")
+	ctx := r.Context()
 
-	ctx := context.Background()
 	exists, err := t.persistenceClient.ReceiptExists(ctx, receiptID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to check receipt: %v", err), http.StatusInternalServerError)
+		t.log.Error("failed to check receipt existence", "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to check receipt", "")
 		return
 	}
 	if !exists {
-		http.Error(w, "receipt not found", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "receipt_not_found", fmt.Sprintf("receipt %q not found", receiptID), "")
 		return
 	}
 
 	items, err := t.persistenceClient.GetReceiptItems(ctx, receiptID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get receipt items: %v", err), http.StatusInternalServerError)
+		t.log.Error("failed to get receipt items", "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to get receipt items", "")
 		return
 	}
 
 	currency, err := t.persistenceClient.GetReceiptCurrency(ctx, receiptID)
 	if err != nil {
-		t.log.Error("Failed to get receipt currency, using USD", "receipt_id", receiptID, "error", err)
+		t.log.Error("failed to get receipt currency, defaulting to USD", "receipt_id", receiptID, "error", err)
 		currency = &defaultUSD
 	}
-	responseItems := itemsToReceiptItems(items, currency)
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]interface{}{"items": responseItems}); err != nil {
-		fmt.Printf("Failed to encode response: %v\n", err)
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{"items": itemsToReceiptItems(items, currency)}); err != nil {
+		t.log.Error("failed to encode receipt items response", "error", err)
 	}
 }
 
-// GetReceiptHandler handles getting the full receipt with users, items, and assignments (bill split data)
-// Expects GET /receipts/{receipt_id}
-// Returns users, items, and assignments (user-item correlation) for easy frontend bill split UI
+// GetReceiptHandler handles GET /receipts/{receipt_id}
 func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
-		return
-	}
-	receiptID, ok := parseReceiptIDPath(r.URL.Path)
-	if !ok {
-		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
-		return
-	}
+	receiptID := r.PathValue("receipt_id")
+	ctx := r.Context()
 
-	ctx := context.Background()
 	exists, err := t.persistenceClient.ReceiptExists(ctx, receiptID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to check receipt: %v", err), http.StatusInternalServerError)
+		t.log.Error("failed to check receipt existence", "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to check receipt", "")
 		return
 	}
 	if !exists {
-		http.Error(w, "receipt not found", http.StatusNotFound)
+		writeJSONError(w, http.StatusNotFound, "receipt_not_found", fmt.Sprintf("receipt %q not found", receiptID), "")
 		return
 	}
 
 	users, err := t.persistenceClient.GetReceiptUsers(ctx, receiptID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get receipt users: %v", err), http.StatusInternalServerError)
+		t.log.Error("failed to get receipt users", "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to get receipt users", "")
 		return
 	}
 	items, err := t.persistenceClient.GetReceiptItems(ctx, receiptID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get receipt items: %v", err), http.StatusInternalServerError)
+		t.log.Error("failed to get receipt items", "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to get receipt items", "")
 		return
 	}
 	assignments, err := t.persistenceClient.GetReceiptAssignments(ctx, receiptID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("Failed to get receipt assignments: %v", err), http.StatusInternalServerError)
+		t.log.Error("failed to get receipt assignments", "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to get receipt assignments", "")
 		return
 	}
 
 	currency, err := t.persistenceClient.GetReceiptCurrency(ctx, receiptID)
 	if err != nil {
-		t.log.Error("Failed to get receipt currency, using USD", "receipt_id", receiptID, "error", err)
+		t.log.Error("failed to get receipt currency, defaulting to USD", "receipt_id", receiptID, "error", err)
 		currency = &defaultUSD
 	}
 
@@ -242,44 +198,34 @@ func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {
-		fmt.Printf("Failed to encode response: %v\n", err)
+		t.log.Error("failed to encode get receipt response", "error", err)
 	}
 }
 
-// AssignItemsToUserHandler handles assigning items to a user
-// Expects POST /receipts/{receipt_id}/users/{user_id}/items
+// AssignItemsToUserHandler handles POST /receipts/{receipt_id}/users/{user_id}/items
 func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, NewInvalidMethodError(r.Method).Error(), http.StatusMethodNotAllowed)
-		return
-	}
-	userID, ok := parseReceiptUserItemsPath(r.URL.Path)
-	if !ok {
-		http.Error(w, NewValidationError("path", "invalid URL path format").Error(), http.StatusBadRequest)
-		return
-	}
+	userID := r.PathValue("user_id")
 
 	var req AssignItemsToUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, NewValidationError("body", fmt.Sprintf("failed to parse request body: %v", err)).Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "invalid_body", "failed to parse request body", "")
 		return
 	}
 	if len(req.ItemIDs) == 0 {
-		http.Error(w, NewValidationError("item_ids", "at least one item_id is required").Error(), http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing_field", newValidationError("item_ids", "at least one item_id is required").Error(), "")
 		return
 	}
 
 	assignedItems := make([]AssignItemsToUserItem, 0, len(req.ItemIDs))
-
-	ctx := context.Background()
 	for _, itemID := range req.ItemIDs {
-		assignment, err := t.persistenceClient.AssignItemToUser(ctx, userID, itemID, nil)
+		assignment, err := t.persistenceClient.AssignItemToUser(r.Context(), userID, itemID, nil)
 		if err != nil {
-			if strings.Contains(err.Error(), "not found") {
-				http.Error(w, err.Error(), http.StatusNotFound)
+			t.log.Error("failed to assign item to user", "user_id", userID, "item_id", itemID, "error", err)
+			if isNotFound(err) {
+				writeJSONError(w, http.StatusNotFound, "not_found", err.Error(), "")
 				return
 			}
-			http.Error(w, fmt.Sprintf("Failed to assign item %s to user: %v", itemID, err), http.StatusInternalServerError)
+			writeJSONError(w, http.StatusInternalServerError, "assign_failed", fmt.Sprintf("failed to assign item %q to user", itemID), "")
 			return
 		}
 		assignedItems = append(assignedItems, AssignItemsToUserItem{
@@ -289,15 +235,13 @@ func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Requ
 		})
 	}
 
-	response := AssignItemsToUserResponse{
-		Message: fmt.Sprintf("Successfully assigned %d item(s) to user", len(assignedItems)),
-		Items:   assignedItems,
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		fmt.Printf("Failed to encode response: %v\n", err)
+	if err := json.NewEncoder(w).Encode(AssignItemsToUserResponse{
+		Message: fmt.Sprintf("successfully assigned %d item(s) to user", len(assignedItems)),
+		Items:   assignedItems,
+	}); err != nil {
+		t.log.Error("failed to encode assign items response", "error", err)
 	}
 }
 
@@ -313,4 +257,9 @@ func itemsToReceiptItems(items []persistence.ReceiptItem, currency *string) []Re
 		}
 	}
 	return result
+}
+
+// isNotFound returns true when an error message indicates a "not found" condition.
+func isNotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "not found")
 }

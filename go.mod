@@ -4,9 +4,9 @@ go 1.24
 
 require (
 	cloud.google.com/go/auth v0.16.3
-	cloud.google.com/go/documentai v1.38.0
 	cloud.google.com/go/storage v1.53.0
 	cloud.google.com/go/vision v1.2.0
+	github.com/Rhymond/go-money v1.0.15
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/oklog/ulid/v2 v2.1.1
 	github.com/pressly/goose/v3 v3.26.0
@@ -27,7 +27,6 @@ require (
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/detectors/gcp v1.27.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/exporter/metric v0.51.0 // indirect
 	github.com/GoogleCloudPlatform/opentelemetry-operations-go/internal/resourcemapping v0.51.0 // indirect
-	github.com/Rhymond/go-money v1.0.15 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/cncf/xds/go v0.0.0-20250501225837-2ac532fd4443 // indirect
 	github.com/envoyproxy/go-control-plane/envoy v1.32.4 // indirect

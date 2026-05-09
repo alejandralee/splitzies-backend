@@ -119,16 +119,12 @@ Receipt OCR text:
 		return empty, fmt.Errorf("failed to generate content: %w", err)
 	}
 
-	fmt.Println("Gemini response:", resp)
-
 	responseText := extractGeminiText(resp)
 	if responseText == "" {
 		return empty, fmt.Errorf("empty response from Gemini")
 	}
 
-	fmt.Println("Gemini response text:", responseText)
 	cleaned := cleanGeminiJSON(responseText)
-	fmt.Println("Cleaned Gemini JSON:", cleaned)
 	var parsed geminiReceiptData
 	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
 		return empty, fmt.Errorf("failed to parse Gemini JSON: %w", err)
