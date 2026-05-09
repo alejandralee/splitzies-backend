@@ -8,6 +8,7 @@ import (
 	"log"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 
@@ -18,6 +19,55 @@ import (
 
 //go:embed swagger/docs.html swagger.yaml
 var swaggerFS embed.FS
+
+func corsMiddleware(next http.Handler) http.Handler {
+	// Keep this intentionally small + explicit: allow known frontend origins and dev localhost.
+	// You can additionally extend via CORS_ALLOWED_ORIGINS (comma-separated list).
+	allowedOrigins := map[string]struct{}{
+		"http://localhost:3000": {},
+		"http://localhost:5173": {},
+
+		"https://preview-sandbox--69b99817fffd276b869a4db1.base44.app": {},
+		// Base44 production domain (main app)
+		"https://splitzies.base44.app": {},
+	}
+
+	if extra := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS")); extra != "" {
+		for _, o := range strings.Split(extra, ",") {
+			o = strings.TrimSpace(o)
+			if o == "" {
+				continue
+			}
+			allowedOrigins[o] = struct{}{}
+		}
+	}
+
+	allowedMethods := "GET,POST,PATCH,OPTIONS"
+	allowedHeaders := "Content-Type,Authorization"
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			if _, ok := allowedOrigins[origin]; ok {
+				w.Header().Set("Access-Control-Allow-Origin", origin)
+				w.Header().Set("Vary", "Origin")
+				w.Header().Set("Access-Control-Allow-Methods", allowedMethods)
+				w.Header().Set("Access-Control-Allow-Headers", allowedHeaders)
+			} else if u, err := url.Parse(origin); err == nil && u.Scheme != "" && u.Host != "" {
+				// If a browser sends an origin we don't recognize, fail CORS by omitting headers.
+				// (We still allow non-browser server-to-server calls which typically omit Origin.)
+			}
+		}
+
+		if r.Method == http.MethodOptions {
+			// Preflight: if origin isn't allowed, we intentionally return without CORS headers.
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+
+		next.ServeHTTP(w, r)
+	})
+}
 
 func main() {
 	ctx := context.Background()
@@ -122,5 +172,5 @@ func main() {
 	})
 
 	fmt.Printf("Server starting on %s\n", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	log.Fatal(http.ListenAndServe(addr, corsMiddleware(http.DefaultServeMux)))
 }
