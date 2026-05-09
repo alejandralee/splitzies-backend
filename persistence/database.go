@@ -7,36 +7,38 @@ import (
 	"os"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/pgx/v5/stdlib"
 	"github.com/pressly/goose/v3"
 )
 
-// Client wraps the database connection.
+// Client wraps a connection pool for safe concurrent use and automatic reconnection.
 type Client struct {
-	db *pgx.Conn
+	db *pgxpool.Pool
 }
 
-// NewClient connects to the database and returns a Client.
+// NewClient creates a connection pool and verifies connectivity.
 func NewClient(ctx context.Context, databaseURL string) (*Client, error) {
-	conn, err := pgx.Connect(ctx, databaseURL)
+	pool, err := pgxpool.New(ctx, databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
+		return nil, fmt.Errorf("failed to create connection pool: %w", err)
 	}
 
+	// Verify the pool can reach the database.
 	var version string
-	if err := conn.QueryRow(ctx, "SELECT version()").Scan(&version); err != nil {
-		conn.Close(ctx)
+	if err := pool.QueryRow(ctx, "SELECT version()").Scan(&version); err != nil {
+		pool.Close()
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
 	log.Printf("Connected to: %s", version)
-	return &Client{db: conn}, nil
+	return &Client{db: pool}, nil
 }
 
-// Close closes the database connection.
-func (c *Client) Close(ctx context.Context) error {
+// Close drains and closes all pool connections.
+func (c *Client) Close(_ context.Context) error {
 	if c.db != nil {
-		return c.db.Close(ctx)
+		c.db.Close()
 	}
 	return nil
 }
