@@ -114,7 +114,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 			return true
 		}
 		// Allow any subdomain of known preview hosting platforms (https only).
-		for _, suffix := range []string{".base44.app", ".vusercontent.net"} {
+		for _, suffix := range []string{".base44.app", ".vusercontent.net", ".vercel.app"} {
 			if strings.HasPrefix(origin, "https://") && strings.HasSuffix(origin, suffix) {
 				return true
 			}
