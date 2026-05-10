@@ -113,9 +113,13 @@ func corsMiddleware(next http.Handler) http.Handler {
 		if _, ok := exactOrigins[origin]; ok {
 			return true
 		}
-		// Allow any subdomain of base44.app (covers all preview/sandbox URLs).
-		return strings.HasSuffix(origin, ".base44.app") &&
-			strings.HasPrefix(origin, "https://")
+		// Allow any subdomain of known preview hosting platforms (https only).
+		for _, suffix := range []string{".base44.app", ".vusercontent.net"} {
+			if strings.HasPrefix(origin, "https://") && strings.HasSuffix(origin, suffix) {
+				return true
+			}
+		}
+		return false
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
