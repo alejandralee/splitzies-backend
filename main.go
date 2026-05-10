@@ -89,29 +89,42 @@ func main() {
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
-	allowedOrigins := map[string]struct{}{
-		"https://preview--splitly-easy-bills.base44.app": {},
-		"https://splitzies.base44.app":                   {},
+	// exactOrigins covers production; base44 preview URLs are handled by the
+	// wildcard suffix check below so they don't need to be listed individually.
+	exactOrigins := map[string]struct{}{
+		"https://splitzies.base44.app": {},
 	}
 
-	// Allow localhost origins only in development to prevent any local dev server
-	// from being able to make CORS requests against the production API.
+	// Allow localhost origins only in development.
 	if os.Getenv("ENV") == "development" || os.Getenv("ENV") == "dev" {
-		allowedOrigins["http://localhost:3000"] = struct{}{}
-		allowedOrigins["http://localhost:5173"] = struct{}{}
+		exactOrigins["http://localhost:3000"] = struct{}{}
+		exactOrigins["http://localhost:5173"] = struct{}{}
 	}
 
 	if extra := strings.TrimSpace(os.Getenv("CORS_ALLOWED_ORIGINS")); extra != "" {
 		for _, o := range strings.Split(extra, ",") {
 			if o = strings.TrimSpace(o); o != "" {
-				allowedOrigins[o] = struct{}{}
+				exactOrigins[o] = struct{}{}
 			}
 		}
 	}
 
+	isAllowed := func(origin string) bool {
+		if _, ok := exactOrigins[origin]; ok {
+			return true
+		}
+		// Allow any subdomain of known preview hosting platforms (https only).
+		for _, suffix := range []string{".base44.app", ".vusercontent.net"} {
+			if strings.HasPrefix(origin, "https://") && strings.HasSuffix(origin, suffix) {
+				return true
+			}
+		}
+		return false
+	}
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		origin := r.Header.Get("Origin")
-		if _, ok := allowedOrigins[origin]; ok && origin != "" {
+		if origin != "" && isAllowed(origin) {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")

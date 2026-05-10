@@ -7,18 +7,18 @@ info:
     name: Splitzies
 
 servers:
+  - url: https://splitzies-backend-b74f565207ff.herokuapp.com
+    description: Production
   - url: http://localhost:8080
-    description: Local development server
-  - url: /
-    description: Current host (for Swagger UI "Try it out")
+    description: Local development
 
 paths:
   /receipts/image:
     post:
       summary: Upload receipt image
       description: |
-        Upload a receipt image for OCR processing. The image is stored in GCS, 
-        OCR is performed to extract text, and items are parsed using AI (Gemini).
+        Upload a receipt image for OCR processing. The image is stored in GCS,
+        OCR is performed to extract text, and items are parsed using Gemini.
         Returns the receipt ID, image URL, and parsed items.
       operationId: uploadReceiptImage
       requestBody:
@@ -36,38 +36,34 @@ paths:
                   description: Receipt image file (JPEG, PNG, GIF, or WebP, max 10MB)
       responses:
         '201':
-          description: Receipt image uploaded and processed successfully
+          description: Receipt uploaded and processed successfully
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/UploadReceiptImageResponse'
+                $ref: '#/components/schemas/UploadReceiptResponse'
         '400':
-          description: Invalid request (missing image, invalid file type, file too large)
+          description: Invalid request (missing image, unsupported file type, file too large)
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-                example: "validation error: image - failed to get image file"
-        '405':
-          description: Method not allowed
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /receipts/{receipt_id}:
     get:
-      summary: Get receipt with bill split data
+      summary: Get full receipt with bill split data
       description: |
-        Returns the full receipt with users, items, and assignments (user-item correlation).
-        The assignments array links users to items for building the bill split UI - each
-        assignment has user_id, item_id, and amount_owed (computed as equal split among assignees).
+        Returns the receipt with users, items, and assignments. Each assignment
+        links a user to an item and includes amount_owed, computed as an equal
+        split among all users assigned to that item (rounded to whole cents).
       operationId: getReceipt
       parameters:
-        - name: receipt_id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The receipt ID
+        - $ref: '#/components/parameters/receipt_id'
       responses:
         '200':
           description: Receipt with users, items, and assignments
@@ -78,26 +74,23 @@ paths:
         '404':
           description: Receipt not found
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-        '405':
-          description: Method not allowed
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
     patch:
       summary: Update receipt tax and tip
       description: |
-        Update tax and/or tip on a receipt. Use when values were not parsed from the receipt
-        during upload. Only provided fields are updated.
+        Update tax and/or tip on a receipt. Use when values were not parsed
+        from the receipt during upload. Only provided fields are updated.
       operationId: patchReceipt
       parameters:
-        - name: receipt_id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The receipt ID
+        - $ref: '#/components/parameters/receipt_id'
       requestBody:
         required: true
         content:
@@ -114,36 +107,33 @@ paths:
                 properties:
                   message:
                     type: string
-                    example: "Receipt updated successfully"
+                    example: "receipt updated successfully"
         '400':
-          description: Invalid request (body must include at least one of tax or tip)
+          description: Invalid request (must include at least one of tax or tip)
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Receipt not found
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-        '405':
-          description: Method not allowed
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /receipts/{receipt_id}/users:
     get:
-      summary: Get users for receipt
+      summary: Get users on a receipt
       description: List all users/participants associated with a receipt.
       operationId: getReceiptUsers
       parameters:
-        - name: receipt_id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The receipt ID
+        - $ref: '#/components/parameters/receipt_id'
       responses:
         '200':
           description: List of users
@@ -154,24 +144,21 @@ paths:
         '404':
           description: Receipt not found
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-        '405':
-          description: Method not allowed
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
     post:
       summary: Add user to receipt
-      description: Add a user/participant to a receipt for splitting items.
+      description: Add a participant to a receipt for bill splitting.
       operationId: addUserToReceipt
       parameters:
-        - name: receipt_id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The receipt ID from the upload response
+        - $ref: '#/components/parameters/receipt_id'
       requestBody:
         required: true
         content:
@@ -186,34 +173,31 @@ paths:
               schema:
                 $ref: '#/components/schemas/AddUserToReceiptResponse'
         '400':
-          description: Invalid request (missing name, invalid path)
+          description: Invalid request (missing name)
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Receipt not found
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-        '405':
-          description: Method not allowed
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /receipts/{receipt_id}/items:
     get:
-      summary: Get items for receipt
-      description: List all items on a receipt.
+      summary: Get items on a receipt
+      description: List all line items on a receipt.
       operationId: getReceiptItems
       parameters:
-        - name: receipt_id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The receipt ID
+        - $ref: '#/components/parameters/receipt_id'
       responses:
         '200':
           description: List of receipt items
@@ -224,34 +208,32 @@ paths:
         '404':
           description: Receipt not found
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-        '405':
-          description: Method not allowed
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /receipts/{receipt_id}/users/{user_id}/items:
     post:
-      summary: Assign items to user
+      summary: Assign items to a user
       description: |
-        Assign receipt items to a user. Amount owed is computed as equal split among
-        all users assigned to each item (see GET receipt for computed amounts).
+        Assign one or more receipt items to a user. Amounts owed are computed
+        as an equal split among all users assigned to each item. Re-posting
+        an already-assigned item updates the assignment (upsert).
       operationId: assignItemsToUser
       parameters:
-        - name: receipt_id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: The receipt ID
+        - $ref: '#/components/parameters/receipt_id'
         - name: user_id
           in: path
           required: true
           schema:
             type: string
-          description: The receipt user ID (from add user response)
+          description: Receipt user ID (from add user response)
       requestBody:
         required: true
         content:
@@ -266,76 +248,105 @@ paths:
               schema:
                 $ref: '#/components/schemas/AssignItemsToUserResponse'
         '400':
-          description: Invalid request (empty item_ids, invalid path)
+          description: Invalid request (item_ids must not be empty)
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: User or item not found
+          description: User or item not found, or they belong to different receipts
           content:
-            text/plain:
+            application/json:
               schema:
-                type: string
-        '405':
-          description: Method not allowed
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
 components:
+  parameters:
+    receipt_id:
+      name: receipt_id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Receipt ID (ULID)
+
   schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Human-readable error message
+          example: "receipt \"01J...\" not found"
+        code:
+          type: string
+          description: Machine-readable error code
+          example: "receipt_not_found"
+        request_id:
+          type: string
+          description: Request ID from X-Request-Id header (when provided)
+          example: "f5542cdd-b900-260c-591c-c771cf2df890"
+
+    MoneyAmount:
+      type: number
+      format: double
+      description: |
+        Monetary amount serialized as a plain decimal number with currency-aware
+        precision (e.g. 2 decimal places for USD, 0 for JPY).
+      example: 12.95
+
     ReceiptItem:
       type: object
       properties:
         id:
           type: string
-          description: Unique item ID
+          description: Item ID (ULID)
         name:
           type: string
           description: Item name
         quantity:
           type: integer
-          description: Item quantity
+          description: Quantity
         total_price:
-          type: number
-          format: double
+          $ref: '#/components/schemas/MoneyAmount'
           nullable: true
-          description: Total price for this item
         price_per_item:
-          type: number
-          format: double
+          $ref: '#/components/schemas/MoneyAmount'
           nullable: true
-          description: Price per unit
 
-    UploadReceiptImageResponse:
+    UploadReceiptResponse:
       type: object
       properties:
-        message:
-          type: string
-          example: "Receipt image uploaded successfully with ID: rcpt_abc123"
         receipt_id:
           type: string
-          description: Unique receipt ID for subsequent API calls
+          description: Receipt ID — use this for all subsequent calls
+          example: "01J8K2M3N4P5Q6R7S8T9V0W1X2"
         image_url:
           type: string
           format: uri
-          description: URL of the uploaded image in GCS
+          description: GCS URL of the uploaded image
         items:
           type: array
           items:
             $ref: '#/components/schemas/ReceiptItem'
-          description: Parsed items from OCR/AI
+          description: Line items parsed from OCR/Gemini (may be empty if OCR found nothing)
         ocr_text:
           type: string
-          description: Raw OCR text (when available, for debugging)
+          description: Raw OCR text, included when available
         tax:
-          type: number
-          format: double
-          description: Tax amount parsed from receipt (when detected)
+          $ref: '#/components/schemas/MoneyAmount'
+          nullable: true
+          description: Tax amount parsed from receipt (null if not detected)
         tip:
-          type: number
-          format: double
-          description: Tip amount parsed from receipt (when detected)
+          $ref: '#/components/schemas/MoneyAmount'
+          nullable: true
+          description: Tip amount parsed from receipt (null if not detected)
 
     AddUserToReceiptRequest:
       type: object
@@ -344,104 +355,25 @@ components:
       properties:
         name:
           type: string
-          description: User/participant name
-          example: "John Doe"
+          description: Participant name
+          example: "Alice"
 
     AddUserToReceiptResponse:
       type: object
       properties:
         message:
           type: string
-          example: "User added to receipt successfully"
+          example: "user added to receipt successfully"
         user:
           type: object
           properties:
             id:
               type: string
-              description: Receipt user ID (use for assignment)
+              description: Receipt user ID — use this when assigning items
             receipt_id:
               type: string
             name:
               type: string
-
-    AssignItemsToUserRequest:
-      type: object
-      required:
-        - item_ids
-      properties:
-        item_ids:
-          type: array
-          items:
-            type: string
-          description: Receipt item IDs to assign to this user
-          minItems: 1
-          example: ["item_abc123", "item_def456"]
-
-    AssignItemsToUserResponse:
-      type: object
-      properties:
-        message:
-          type: string
-          example: "Successfully assigned 2 item(s) to user"
-        items:
-          type: array
-          items:
-            type: object
-            properties:
-              id:
-                type: string
-                description: Assignment ID
-              receipt_user_id:
-                type: string
-              receipt_item_id:
-                type: string
-
-    GetReceiptResponse:
-      type: object
-      description: Full receipt with users, items, and user-item assignments for bill split
-      properties:
-        receipt_id:
-          type: string
-          description: Receipt ID
-        users:
-          type: array
-          items:
-            type: object
-            properties:
-              id:
-                type: string
-                description: Receipt user ID
-              receipt_id:
-                type: string
-              name:
-                type: string
-              user_total:
-                type: number
-                format: double
-                description: Sum of amount_owed for all items assigned to this user
-        items:
-          type: array
-          items:
-            $ref: '#/components/schemas/ReceiptItem'
-        assignments:
-          type: array
-          description: User-item correlation for bill split. amount_owed is computed as equal split among all users assigned to each item, rounded to whole cents.
-          items:
-            type: object
-            properties:
-              id:
-                type: string
-                description: Assignment ID
-              user_id:
-                type: string
-                description: Receipt user ID
-              item_id:
-                type: string
-                description: Receipt item ID
-              amount_owed:
-                type: number
-                format: double
-                description: Amount this user owes for this item (equal split among assignees, whole cents)
 
     GetReceiptUsersResponse:
       type: object
@@ -457,6 +389,10 @@ components:
                 type: string
               name:
                 type: string
+              user_total:
+                $ref: '#/components/schemas/MoneyAmount'
+                nullable: true
+                description: Total amount owed by this user (omitted when no assignments exist)
 
     GetReceiptItemsResponse:
       type: object
@@ -466,9 +402,84 @@ components:
           items:
             $ref: '#/components/schemas/ReceiptItem'
 
+    GetReceiptResponse:
+      type: object
+      description: Full receipt with users, items, and computed bill split assignments
+      properties:
+        receipt_id:
+          type: string
+        users:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              receipt_id:
+                type: string
+              name:
+                type: string
+              user_total:
+                $ref: '#/components/schemas/MoneyAmount'
+                nullable: true
+                description: Sum of amount_owed across all items assigned to this user
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReceiptItem'
+        assignments:
+          type: array
+          description: |
+            User-item correlations for the bill split. amount_owed is an equal
+            share of the item's total_price among all assigned users, rounded
+            to whole cents (remainders distributed to earlier assignees).
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+              user_id:
+                type: string
+              item_id:
+                type: string
+              amount_owed:
+                $ref: '#/components/schemas/MoneyAmount'
+
+    AssignItemsToUserRequest:
+      type: object
+      required:
+        - item_ids
+      properties:
+        item_ids:
+          type: array
+          items:
+            type: string
+          minItems: 1
+          description: Item IDs to assign to this user
+          example: ["01J8K2M3N4P5Q6R7S8T9V0W1X2", "01J8K2M3N4P5Q6R7S8T9V0W1X3"]
+
+    AssignItemsToUserResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "successfully assigned 2 item(s) to user"
+        items:
+          type: array
+          items:
+            type: object
+            properties:
+              id:
+                type: string
+                description: Assignment ID
+              receipt_user_id:
+                type: string
+              receipt_item_id:
+                type: string
+
     PatchReceiptRequest:
       type: object
-      description: Update tax and/or tip (only provided fields are updated)
+      description: At least one of tax or tip must be provided
       minProperties: 1
       properties:
         tax:
@@ -476,8 +487,10 @@ components:
           format: double
           nullable: true
           description: Sales tax amount
+          example: 1.50
         tip:
           type: number
           format: double
           nullable: true
           description: Tip/gratuity amount
+          example: 5.00
