@@ -28,16 +28,20 @@ func TestRound(t *testing.T) {
 
 func TestAmountMarshalJSON(t *testing.T) {
 	usd := "USD"
+	jpy := "JPY"
 	tests := []struct {
-		value float64
-		want  string
+		value    float64
+		currency *string
+		want     string
 	}{
-		{21.95, "21.95"},
-		{22.0, "22.00"},
-		{18.0, "18.00"},
+		{21.95, &usd, `{"amount":21.95,"currency":"USD"}`},
+		{22.0, &usd, `{"amount":22.00,"currency":"USD"}`},
+		{18.0, &usd, `{"amount":18.00,"currency":"USD"}`},
+		{1500.0, &jpy, `{"amount":1500,"currency":"JPY"}`},
+		{21.95, nil, `{"amount":21.95,"currency":"USD"}`},
 	}
 	for _, tt := range tests {
-		a := Amount{Value: tt.value, Currency: &usd}
+		a := Amount{Value: tt.value, Currency: tt.currency}
 		b, err := json.Marshal(a)
 		if err != nil {
 			t.Fatalf("Marshal: %v", err)
@@ -50,13 +54,12 @@ func TestAmountMarshalJSON(t *testing.T) {
 
 func TestNewAmountPreservesDecimals(t *testing.T) {
 	usd := "USD"
-	// NewAmount uses Round - ensure 21.95 is preserved (was incorrectly rounded to 22.00 before fix)
 	a := NewAmount(21.95, &usd)
 	if a.Value != 21.95 {
 		t.Errorf("NewAmount(21.95) = %v, want 21.95", a.Value)
 	}
 	b, _ := json.Marshal(a)
-	if string(b) != "21.95" {
-		t.Errorf("NewAmount(21.95) marshaled as %q, want \"21.95\"", string(b))
+	if string(b) != `{"amount":21.95,"currency":"USD"}` {
+		t.Errorf("NewAmount(21.95) marshaled as %q", string(b))
 	}
 }

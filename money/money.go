@@ -15,11 +15,18 @@ type Amount struct {
 	Currency *string
 }
 
-// MarshalJSON implements json.Marshaler to output clean decimal format (e.g. 12.95 not 12.950000762939453).
+// MarshalJSON implements json.Marshaler to output {"amount": 12.95, "currency": "USD"}.
 func (a Amount) MarshalJSON() ([]byte, error) {
 	decimals := DecimalPlaces(a.Currency)
 	format := fmt.Sprintf("%%.%df", decimals)
-	return []byte(fmt.Sprintf(format, a.Value)), nil
+	amountStr := fmt.Sprintf(format, a.Value)
+
+	currency := money.USD
+	if a.Currency != nil && strings.TrimSpace(*a.Currency) != "" {
+		currency = strings.ToUpper(*a.Currency)
+	}
+
+	return []byte(fmt.Sprintf(`{"amount":%s,"currency":%q}`, amountStr, currency)), nil
 }
 
 // DecimalPlaces returns the number of decimal places for the currency per ISO 4217.

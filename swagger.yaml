@@ -294,12 +294,21 @@ components:
           example: "f5542cdd-b900-260c-591c-c771cf2df890"
 
     MoneyAmount:
-      type: number
-      format: double
-      description: |
-        Monetary amount serialized as a plain decimal number with currency-aware
-        precision (e.g. 2 decimal places for USD, 0 for JPY).
-      example: 12.95
+      type: object
+      description: Monetary amount with currency code and currency-aware decimal precision.
+      properties:
+        amount:
+          type: number
+          format: double
+          description: Numeric value rounded to the currency's decimal places (e.g. 2 for USD, 0 for JPY).
+          example: 12.95
+        currency:
+          type: string
+          description: ISO 4217 currency code.
+          example: USD
+      example:
+        amount: 12.95
+        currency: USD
 
     ReceiptItem:
       type: object
