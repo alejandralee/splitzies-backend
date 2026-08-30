@@ -114,7 +114,7 @@ Receipt OCR text:
 		TopK:            genai.Ptr(float32(40)),
 		MaxOutputTokens: 1024,
 	}
-	resp, err := client.Models.GenerateContent(ctx, "gemini-2.0-flash-001", genai.Text(prompt), config)
+	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(prompt), config)
 	if err != nil {
 		return empty, fmt.Errorf("failed to generate content: %w", err)
 	}
