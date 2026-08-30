@@ -112,7 +112,10 @@ Receipt OCR text:
 		Temperature:     genai.Ptr(float32(0.1)),
 		TopP:            genai.Ptr(float32(0.95)),
 		TopK:            genai.Ptr(float32(40)),
-		MaxOutputTokens: 1024,
+		MaxOutputTokens: 4096,
+		ThinkingConfig: &genai.ThinkingConfig{
+			ThinkingBudget: genai.Ptr(int32(0)),
+		},
 	}
 	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(prompt), config)
 	if err != nil {
