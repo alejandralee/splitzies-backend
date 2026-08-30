@@ -38,25 +38,14 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	var (
-		parsedItems []persistence.ReceiptItemDB
-		ocrTextData *persistence.OCRTextData
-		currency    *string
-		receiptDate *time.Time
-		title       *string
-		tax, tip    *float64
-	)
-	if ocr := t.parseOCRForReceipt(ctx, fileData); ocr != nil {
-		parsedItems = ocr.items
-		ocrTextData = ocr.ocrTextData
-		currency = ocr.currency
-		receiptDate = ocr.receiptDate
-		title = ocr.title
-		tax = ocr.tax
-		tip = ocr.tip
+	ocr := t.parseOCRForReceipt(ctx, rid, fileData)
+	if ocr == nil || len(ocr.items) == 0 {
+		t.log.Error("no receipt items extracted, not persisting receipt", "request_id", rid, "image_url", imageURL)
+		writeJSONError(w, http.StatusUnprocessableEntity, "receipt_parse_failed", "failed to extract any items from receipt image", rid)
+		return
 	}
 
-	savedReceipt, err := t.persistenceClient.SaveReceipt(ctx, parsedItems, &imageURL, ocrTextData, currency, receiptDate, title, tax, tip)
+	savedReceipt, err := t.persistenceClient.SaveReceipt(ctx, ocr.items, &imageURL, ocr.ocrTextData, ocr.currency, ocr.receiptDate, ocr.title, ocr.tax, ocr.tip)
 	if err != nil {
 		t.log.Error("failed to save receipt", "request_id", rid, "image_url", imageURL, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "receipt_save_failed", "failed to save receipt", rid)
@@ -65,7 +54,7 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(buildUploadReceiptResponse(savedReceipt, imageURL, ocrTextData, currency, tax, tip)); err != nil {
+	if err := json.NewEncoder(w).Encode(buildUploadReceiptResponse(savedReceipt, imageURL, ocr.ocrTextData, ocr.currency, ocr.tax, ocr.tip)); err != nil {
 		t.log.Error("failed to encode upload receipt response", "request_id", rid, "error", err)
 	}
 }
@@ -83,13 +72,14 @@ type ocrParseResult struct {
 
 // parseOCRForReceipt performs OCR on the image bytes then parses the result with Gemini.
 // Returns nil if OCR produces no text; falls back to regex parsing if Gemini fails.
-func (t *Transport) parseOCRForReceipt(ctx context.Context, fileData []byte) *ocrParseResult {
+func (t *Transport) parseOCRForReceipt(ctx context.Context, rid string, fileData []byte) *ocrParseResult {
 	ocrText, err := t.visionClient.PerformOCRFromBytes(ctx, fileData)
 	if err != nil {
-		t.log.Error("OCR failed", "error", err)
+		t.log.Error("receipt OCR request failed", "request_id", rid, "error", err)
 		return nil
 	}
 	if ocrText == "" {
+		t.log.Error("receipt OCR produced no text", "request_id", rid)
 		return nil
 	}
 
@@ -99,8 +89,11 @@ func (t *Transport) parseOCRForReceipt(ctx context.Context, fileData []byte) *oc
 
 	parsed, parseErr := storage.ParseReceiptItemsWithGemini(ctx, ocrText)
 	if parseErr != nil {
-		t.log.Error("Gemini parse failed, falling back to regex", "error", parseErr)
+		t.log.Error("Gemini receipt parse failed, falling back to regex", "request_id", rid, "error", parseErr)
 		parsed.Items = storage.ExtractReceiptItemsFromText(ocrText)
+		if len(parsed.Items) == 0 {
+			t.log.Error("regex fallback also extracted no items from OCR text", "request_id", rid)
+		}
 	}
 
 	result.currency = parsed.Currency
