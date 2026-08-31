@@ -50,22 +50,48 @@ func (o *OCRTextData) Scan(value interface{}) error {
 	return json.Unmarshal(b, o)
 }
 
-// ReceiptItem represents a receipt line-item from the database.
+// ReceiptItemGroup represents a display-only grouping of receipt_items
+// (e.g. "Margarita" grouping 3 individually-assignable units).
+type ReceiptItemGroup struct {
+	ID           string
+	ReceiptID    string
+	Name         string
+	DisplayOrder int
+}
+
+// ReceiptItem represents a single, individually-assignable unit from the database.
+// A quantity>1 line item is stored as multiple ReceiptItem rows sharing a GroupID.
 type ReceiptItem struct {
 	ID           string
 	ReceiptID    string
+	GroupID      string
+	GroupName    string
+	Name         string
+	Amount       float64
+	DisplayOrder int
+}
+
+// ReceiptItemDB is the input shape for SaveReceipt — what OCR/parsing produces
+// (still "3 Margaritas @ $12"); SaveReceipt explodes this into one group plus
+// Quantity individual ReceiptItem rows.
+type ReceiptItemDB struct {
 	Name         string
 	Quantity     int
 	TotalPrice   float64
 	PricePerItem float64
 }
 
-// ReceiptItemDB is used when inserting items (no ID yet).
-type ReceiptItemDB struct {
-	Name         string
-	Quantity     int
-	TotalPrice   float64
-	PricePerItem float64
+// unitAmount returns the per-unit price for exploding a parsed line item into
+// individual units, falling back to TotalPrice/Quantity if PricePerItem is
+// missing/zero (some OCR parses only populate one of the two fields).
+func (item ReceiptItemDB) unitAmount() float64 {
+	if item.PricePerItem != 0 {
+		return item.PricePerItem
+	}
+	if item.Quantity > 0 {
+		return item.TotalPrice / float64(item.Quantity)
+	}
+	return item.TotalPrice
 }
 
 // GenerateReceiptID generates a new ULID string.
@@ -111,23 +137,37 @@ func (c *Client) SaveReceipt(
 	}
 
 	savedItems := make([]ReceiptItem, 0, len(items))
-	for _, item := range items {
-		itemID := ulid.Make().String()
+	for groupOrder, item := range items {
+		groupID := ulid.Make().String()
 		_, err := tx.Exec(ctx,
-			"INSERT INTO receipt_items (id, receipt_id, name, quantity, total_price, price_per_item) VALUES ($1, $2, $3, $4, $5, $6)",
-			itemID, receiptID, item.Name, item.Quantity, item.TotalPrice, item.PricePerItem,
+			"INSERT INTO receipt_item_groups (id, receipt_id, name, display_order) VALUES ($1, $2, $3, $4)",
+			groupID, receiptID, item.Name, groupOrder,
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to insert receipt item: %w", err)
+			return nil, fmt.Errorf("failed to insert receipt item group: %w", err)
 		}
-		savedItems = append(savedItems, ReceiptItem{
-			ID:           itemID,
-			ReceiptID:    receiptID,
-			Name:         item.Name,
-			Quantity:     item.Quantity,
-			TotalPrice:   item.TotalPrice,
-			PricePerItem: item.PricePerItem,
-		})
+
+		amount := item.unitAmount()
+		quantity := max(item.Quantity, 1)
+		for unit := 0; unit < quantity; unit++ {
+			itemID := ulid.Make().String()
+			_, err := tx.Exec(ctx,
+				"INSERT INTO receipt_items (id, receipt_id, group_id, name, amount, display_order) VALUES ($1, $2, $3, $4, $5, $6)",
+				itemID, receiptID, groupID, item.Name, amount, unit,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to insert receipt item: %w", err)
+			}
+			savedItems = append(savedItems, ReceiptItem{
+				ID:           itemID,
+				ReceiptID:    receiptID,
+				GroupID:      groupID,
+				GroupName:    item.Name,
+				Name:         item.Name,
+				Amount:       amount,
+				DisplayOrder: unit,
+			})
+		}
 	}
 
 	if err := tx.Commit(ctx); err != nil {
@@ -135,12 +175,12 @@ func (c *Client) SaveReceipt(
 	}
 
 	var (
-		createdAt   time.Time
-		dbImageURL  *string
-		dbOCRJSON   []byte
-		dbCurrency  *string
-		dbDate      *time.Time
-		dbTitle     *string
+		createdAt  time.Time
+		dbImageURL *string
+		dbOCRJSON  []byte
+		dbCurrency *string
+		dbDate     *time.Time
+		dbTitle    *string
 	)
 	err = c.db.QueryRow(ctx,
 		"SELECT created_at, image_url, ocr_text, currency, receipt_date, title FROM receipts WHERE id = $1",

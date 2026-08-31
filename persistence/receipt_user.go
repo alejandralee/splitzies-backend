@@ -20,12 +20,13 @@ type ReceiptUser struct {
 	CreatedAt time.Time
 }
 
-// ReceiptUserItem represents the assignment of a line-item to a user.
+// ReceiptUserItem represents the assignment of an individual item unit to a
+// user. There is no stored amount — the split is always the item's amount
+// divided evenly among however many users are assigned to it, computed at
+// read time by ComputeBillSplit.
 type ReceiptUserItem struct {
-	ID            string
 	ReceiptUserID string
 	ReceiptItemID string
-	AmountOwed    *float64
 	CreatedAt     time.Time
 }
 
@@ -59,9 +60,9 @@ func (c *Client) AddUserToReceipt(ctx context.Context, receiptID, name string) (
 	}, nil
 }
 
-// AssignItemToUser upserts an assignment of a line-item to a user.
-// On conflict the amount_owed is updated and the existing row is returned.
-func (c *Client) AssignItemToUser(ctx context.Context, receiptUserID, receiptItemID string, amountOwed *float64) (*ReceiptUserItem, error) {
+// AssignUserToItem assigns an item unit to a user (idempotent — assigning the
+// same user/item pair twice is a no-op, not an error).
+func (c *Client) AssignUserToItem(ctx context.Context, receiptUserID, receiptItemID string) (*ReceiptUserItem, error) {
 	var userReceiptID, itemReceiptID string
 	err := c.db.QueryRow(ctx, `
 		SELECT
@@ -79,11 +80,10 @@ func (c *Client) AssignItemToUser(ctx context.Context, receiptUserID, receiptIte
 	}
 
 	_, err = c.db.Exec(ctx, `
-		INSERT INTO receipt_user_items (id, receipt_user_id, receipt_item_id, amount_owed, created_at)
-		VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)
-		ON CONFLICT (receipt_user_id, receipt_item_id)
-		DO UPDATE SET amount_owed = EXCLUDED.amount_owed
-	`, ulid.Make().String(), receiptUserID, receiptItemID, amountOwed)
+		INSERT INTO receipt_item_users (receipt_item_id, receipt_user_id, created_at)
+		VALUES ($1, $2, CURRENT_TIMESTAMP)
+		ON CONFLICT (receipt_item_id, receipt_user_id) DO NOTHING
+	`, receiptItemID, receiptUserID)
 	if err != nil {
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
@@ -92,20 +92,31 @@ func (c *Client) AssignItemToUser(ctx context.Context, receiptUserID, receiptIte
 		return nil, fmt.Errorf("failed to assign item to user: %w", err)
 	}
 
-	// Query by the unique business key because ON CONFLICT preserves the original row ID.
 	var a ReceiptUserItem
 	err = c.db.QueryRow(ctx, `
-		SELECT id, receipt_user_id, receipt_item_id, amount_owed, created_at
-		FROM receipt_user_items
+		SELECT receipt_user_id, receipt_item_id, created_at
+		FROM receipt_item_users
 		WHERE receipt_user_id = $1 AND receipt_item_id = $2
 	`, receiptUserID, receiptItemID).Scan(
-		&a.ID, &a.ReceiptUserID, &a.ReceiptItemID, &a.AmountOwed, &a.CreatedAt,
+		&a.ReceiptUserID, &a.ReceiptItemID, &a.CreatedAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read assignment: %w", err)
 	}
 
 	return &a, nil
+}
+
+// UnassignUserFromItem removes an item unit's assignment to a user, if present.
+func (c *Client) UnassignUserFromItem(ctx context.Context, receiptUserID, receiptItemID string) error {
+	_, err := c.db.Exec(ctx,
+		"DELETE FROM receipt_item_users WHERE receipt_user_id = $1 AND receipt_item_id = $2",
+		receiptUserID, receiptItemID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to unassign item from user: %w", err)
+	}
+	return nil
 }
 
 // GetReceiptUsers returns all users on a receipt ordered by creation time.
@@ -133,12 +144,16 @@ func (c *Client) GetReceiptUsers(ctx context.Context, receiptID string) ([]Recei
 	return users, nil
 }
 
-// GetReceiptItems returns all line-items on a receipt ordered by ID.
+// GetReceiptItems returns all individually-assignable units on a receipt,
+// ordered by their group's display order then their own display order.
 func (c *Client) GetReceiptItems(ctx context.Context, receiptID string) ([]ReceiptItem, error) {
-	rows, err := c.db.Query(ctx,
-		"SELECT id, receipt_id, name, quantity, total_price, price_per_item FROM receipt_items WHERE receipt_id = $1 ORDER BY id ASC",
-		receiptID,
-	)
+	rows, err := c.db.Query(ctx, `
+		SELECT ri.id, ri.receipt_id, ri.group_id, rig.name, ri.name, ri.amount, ri.display_order
+		FROM receipt_items ri
+		JOIN receipt_item_groups rig ON rig.id = ri.group_id
+		WHERE ri.receipt_id = $1
+		ORDER BY rig.display_order ASC, ri.display_order ASC
+	`, receiptID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query receipt items: %w", err)
 	}
@@ -147,7 +162,7 @@ func (c *Client) GetReceiptItems(ctx context.Context, receiptID string) ([]Recei
 	var items []ReceiptItem
 	for rows.Next() {
 		var item ReceiptItem
-		if err := rows.Scan(&item.ID, &item.ReceiptID, &item.Name, &item.Quantity, &item.TotalPrice, &item.PricePerItem); err != nil {
+		if err := rows.Scan(&item.ID, &item.ReceiptID, &item.GroupID, &item.GroupName, &item.Name, &item.Amount, &item.DisplayOrder); err != nil {
 			return nil, fmt.Errorf("failed to scan receipt item: %w", err)
 		}
 		items = append(items, item)
@@ -161,8 +176,8 @@ func (c *Client) GetReceiptItems(ctx context.Context, receiptID string) ([]Recei
 // GetReceiptAssignments returns all user-item assignments for a receipt.
 func (c *Client) GetReceiptAssignments(ctx context.Context, receiptID string) ([]ReceiptUserItem, error) {
 	rows, err := c.db.Query(ctx, `
-		SELECT rui.id, rui.receipt_user_id, rui.receipt_item_id, rui.amount_owed, rui.created_at
-		FROM receipt_user_items rui
+		SELECT rui.receipt_user_id, rui.receipt_item_id, rui.created_at
+		FROM receipt_item_users rui
 		JOIN receipt_users ru ON ru.id = rui.receipt_user_id
 		WHERE ru.receipt_id = $1
 		ORDER BY rui.created_at ASC
@@ -175,7 +190,7 @@ func (c *Client) GetReceiptAssignments(ctx context.Context, receiptID string) ([
 	var assignments []ReceiptUserItem
 	for rows.Next() {
 		var a ReceiptUserItem
-		if err := rows.Scan(&a.ID, &a.ReceiptUserID, &a.ReceiptItemID, &a.AmountOwed, &a.CreatedAt); err != nil {
+		if err := rows.Scan(&a.ReceiptUserID, &a.ReceiptItemID, &a.CreatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan receipt assignment: %w", err)
 		}
 		assignments = append(assignments, a)
@@ -256,7 +271,7 @@ func (c *Client) UpdateReceiptTaxTip(ctx context.Context, receiptID string, tax,
 // GetUserItems returns all items assigned to a specific receipt user.
 func (c *Client) GetUserItems(ctx context.Context, receiptUserID string) ([]ReceiptUserItem, error) {
 	rows, err := c.db.Query(ctx,
-		"SELECT id, receipt_user_id, receipt_item_id, amount_owed, created_at FROM receipt_user_items WHERE receipt_user_id = $1 ORDER BY created_at ASC",
+		"SELECT receipt_user_id, receipt_item_id, created_at FROM receipt_item_users WHERE receipt_user_id = $1 ORDER BY created_at ASC",
 		receiptUserID,
 	)
 	if err != nil {
@@ -267,7 +282,7 @@ func (c *Client) GetUserItems(ctx context.Context, receiptUserID string) ([]Rece
 	var items []ReceiptUserItem
 	for rows.Next() {
 		var item ReceiptUserItem
-		if err := rows.Scan(&item.ID, &item.ReceiptUserID, &item.ReceiptItemID, &item.AmountOwed, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.ReceiptUserID, &item.ReceiptItemID, &item.CreatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan user item: %w", err)
 		}
 		items = append(items, item)
