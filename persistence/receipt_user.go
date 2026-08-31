@@ -17,6 +17,9 @@ type ReceiptUser struct {
 	ID        string
 	ReceiptID string
 	Name      string
+	// DeviceID is the device acting as this participant, if one has claimed
+	// them. Nil for participants typed in by someone else.
+	DeviceID  *string
 	CreatedAt time.Time
 }
 
@@ -36,27 +39,51 @@ type ReceiptTaxTip struct {
 	Tip *float64
 }
 
-// AddUserToReceipt creates a new user entry on a receipt.
-// Returns ErrNotFound if the receipt does not exist.
-func (c *Client) AddUserToReceipt(ctx context.Context, receiptID, name string) (*ReceiptUser, error) {
+// AddUserToReceipt creates a new user entry on a receipt. When deviceID is
+// non-nil the new participant is claimed by that device, so its client can tell
+// which of the people on the bill is them.
+// Returns a not-found error if the receipt does not exist.
+func (c *Client) AddUserToReceipt(ctx context.Context, receiptID, name string, deviceID *string) (*ReceiptUser, error) {
 	userID := ulid.Make().String()
 
-	_, err := c.db.Exec(ctx,
-		"INSERT INTO receipt_users (id, receipt_id, name, created_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP)",
-		userID, receiptID, name,
+	tx, err := c.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx,
+		"INSERT INTO receipt_users (id, receipt_id, name, device_id, created_at) VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP)",
+		userID, receiptID, name, deviceID,
 	)
 	if err != nil {
 		var pgErr *pgconn.PgError
-		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
-			return nil, fmt.Errorf("receipt %q not found", receiptID)
+		if errors.As(err, &pgErr) {
+			if pgErr.Code == "23503" {
+				return nil, fmt.Errorf("receipt %q not found", receiptID)
+			}
+			// The partial unique index allows one claimed participant per device
+			// per receipt.
+			if pgErr.Code == "23505" {
+				return nil, fmt.Errorf("device already claims a participant on receipt %q", receiptID)
+			}
 		}
 		return nil, fmt.Errorf("failed to insert receipt user: %w", err)
+	}
+
+	if err := touchReceiptTx(ctx, tx, receiptID); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	return &ReceiptUser{
 		ID:        userID,
 		ReceiptID: receiptID,
 		Name:      name,
+		DeviceID:  deviceID,
 	}, nil
 }
 
@@ -79,7 +106,13 @@ func (c *Client) AssignUserToItem(ctx context.Context, receiptUserID, receiptIte
 		return nil, fmt.Errorf("user and item do not belong to the same receipt")
 	}
 
-	_, err = c.db.Exec(ctx, `
+	tx, err := c.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `
 		INSERT INTO receipt_item_users (receipt_item_id, receipt_user_id, created_at)
 		VALUES ($1, $2, CURRENT_TIMESTAMP)
 		ON CONFLICT (receipt_item_id, receipt_user_id) DO NOTHING
@@ -93,7 +126,7 @@ func (c *Client) AssignUserToItem(ctx context.Context, receiptUserID, receiptIte
 	}
 
 	var a ReceiptUserItem
-	err = c.db.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT receipt_user_id, receipt_item_id, created_at
 		FROM receipt_item_users
 		WHERE receipt_user_id = $1 AND receipt_item_id = $2
@@ -104,17 +137,51 @@ func (c *Client) AssignUserToItem(ctx context.Context, receiptUserID, receiptIte
 		return nil, fmt.Errorf("failed to read assignment: %w", err)
 	}
 
+	if err := touchReceiptTx(ctx, tx, itemReceiptID); err != nil {
+		return nil, err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("failed to commit transaction: %w", err)
+	}
+
 	return &a, nil
 }
 
 // UnassignUserFromItem removes an item unit's assignment to a user, if present.
 func (c *Client) UnassignUserFromItem(ctx context.Context, receiptUserID, receiptItemID string) error {
-	_, err := c.db.Exec(ctx,
+	tx, err := c.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	result, err := tx.Exec(ctx,
 		"DELETE FROM receipt_item_users WHERE receipt_user_id = $1 AND receipt_item_id = $2",
 		receiptUserID, receiptItemID,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to unassign item from user: %w", err)
+	}
+
+	// Nothing was assigned, so nothing changed — leave the version alone so
+	// polling clients aren't woken by a no-op delete.
+	if result.RowsAffected() == 0 {
+		return tx.Commit(ctx)
+	}
+
+	var receiptID string
+	if err := tx.QueryRow(ctx,
+		"SELECT receipt_id FROM receipt_items WHERE id = $1", receiptItemID,
+	).Scan(&receiptID); err != nil {
+		return fmt.Errorf("failed to look up item's receipt: %w", err)
+	}
+	if err := touchReceiptTx(ctx, tx, receiptID); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
 	return nil
 }
@@ -122,7 +189,7 @@ func (c *Client) UnassignUserFromItem(ctx context.Context, receiptUserID, receip
 // GetReceiptUsers returns all users on a receipt ordered by creation time.
 func (c *Client) GetReceiptUsers(ctx context.Context, receiptID string) ([]ReceiptUser, error) {
 	rows, err := c.db.Query(ctx,
-		"SELECT id, receipt_id, name, created_at FROM receipt_users WHERE receipt_id = $1 ORDER BY created_at ASC",
+		"SELECT id, receipt_id, name, device_id, created_at FROM receipt_users WHERE receipt_id = $1 ORDER BY created_at ASC",
 		receiptID,
 	)
 	if err != nil {
@@ -133,7 +200,7 @@ func (c *Client) GetReceiptUsers(ctx context.Context, receiptID string) ([]Recei
 	var users []ReceiptUser
 	for rows.Next() {
 		var u ReceiptUser
-		if err := rows.Scan(&u.ID, &u.ReceiptID, &u.Name, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.ReceiptID, &u.Name, &u.DeviceID, &u.CreatedAt); err != nil {
 			return nil, fmt.Errorf("failed to scan receipt user: %w", err)
 		}
 		users = append(users, u)
@@ -257,7 +324,11 @@ func (c *Client) UpdateReceiptTaxTip(ctx context.Context, receiptID string, tax,
 	}
 	args = append(args, receiptID)
 
-	query := fmt.Sprintf("UPDATE receipts SET %s WHERE id = $%d", strings.Join(setClauses, ", "), n)
+	// Bump the version in the same statement so pollers see the tax/tip change.
+	query := fmt.Sprintf(
+		"UPDATE receipts SET %s, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $%d",
+		strings.Join(setClauses, ", "), n,
+	)
 	result, err := c.db.Exec(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("failed to update receipt: %w", err)
