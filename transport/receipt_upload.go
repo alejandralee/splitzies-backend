@@ -45,7 +45,8 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	savedReceipt, err := t.persistenceClient.SaveReceipt(ctx, ocr.items, &imageURL, ocr.ocrTextData, ocr.currency, ocr.receiptDate, ocr.title, ocr.tax, ocr.tip)
+	// When the uploader has a device token, the receipt lands in their history.
+	savedReceipt, err := t.persistenceClient.SaveReceipt(ctx, ocr.items, &imageURL, ocr.ocrTextData, ocr.currency, ocr.receiptDate, ocr.title, ocr.tax, ocr.tip, deviceIDFromContext(ctx))
 	if err != nil {
 		t.log.Error("failed to save receipt", "request_id", rid, "image_url", imageURL, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "receipt_save_failed", "failed to save receipt", rid)

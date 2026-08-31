@@ -1,6 +1,10 @@
 package transport
 
-import "splitzies/money"
+import (
+	"time"
+
+	"splitzies/money"
+)
 
 // defaultUSD is used when GetReceiptCurrency fails or returns nil
 var defaultUSD = "USD"
@@ -39,9 +43,12 @@ type UploadReceiptResponse struct {
 	Tip       *money.Amount `json:"tip,omitempty"`
 }
 
-// AddUserToReceiptRequest represents the request body for adding a user to a receipt
+// AddUserToReceiptRequest represents the request body for adding a user to a receipt.
+// Claim links the new participant to the calling device (requires a device
+// token) — a friend opening a share link posts their own name with claim: true.
 type AddUserToReceiptRequest struct {
-	Name string `json:"name"`
+	Name  string `json:"name"`
+	Claim bool   `json:"claim,omitempty"`
 }
 
 // AddUserToReceiptResponse represents the response after adding a user to a receipt
@@ -54,11 +61,14 @@ type AddUserToReceiptResponse struct {
 	} `json:"user"`
 }
 
-// GetReceiptUserResponse represents a user in the get receipt response
+// GetReceiptUserResponse represents a user in the get receipt response.
+// DeviceID lets a client recognise which participant is itself — compare it to
+// the device_id from POST /devices.
 type GetReceiptUserResponse struct {
 	ID        string        `json:"id"`
 	ReceiptID string        `json:"receipt_id"`
 	Name      string        `json:"name"`
+	DeviceID  *string       `json:"device_id,omitempty"`
 	UserTotal *money.Amount `json:"user_total,omitempty"`
 }
 
@@ -105,4 +115,55 @@ type AssignItemsToUserResponse struct {
 type PatchReceiptRequest struct {
 	Tax *float64 `json:"tax"`
 	Tip *float64 `json:"tip"`
+}
+
+// CreateDeviceResponse is returned by POST /devices. DeviceToken is shown once
+// and only its hash is stored, so the client must persist it (e.g. localStorage)
+// — losing it loses the device's history.
+type CreateDeviceResponse struct {
+	DeviceID    string `json:"device_id"`
+	DeviceToken string `json:"device_token"`
+}
+
+// ShareLinkResponse is returned by POST /receipts/{id}/share. URL is what the
+// client renders as a QR code and offers as "copy link".
+type ShareLinkResponse struct {
+	ReceiptID string    `json:"receipt_id"`
+	Token     string    `json:"token"`
+	URL       string    `json:"url"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// JoinShareLinkResponse is returned by POST /join/{token}. Joined is false when
+// the caller sent no device token — they can still edit the receipt, it just
+// won't show up in any history.
+type JoinShareLinkResponse struct {
+	ReceiptID  string  `json:"receipt_id"`
+	Joined     bool    `json:"joined"`
+	YourUserID *string `json:"your_user_id,omitempty"`
+}
+
+// ReceiptSummary is one bill in a device's history. It carries headline numbers
+// only — the full items and assignments come from GET /receipts/{id}.
+type ReceiptSummary struct {
+	ReceiptID        string        `json:"receipt_id"`
+	Title            *string       `json:"title,omitempty"`
+	ImageURL         *string       `json:"image_url,omitempty"`
+	ReceiptDate      *time.Time    `json:"receipt_date,omitempty"`
+	CreatedAt        time.Time     `json:"created_at"`
+	UpdatedAt        time.Time     `json:"updated_at"`
+	Role             string        `json:"role"`
+	ParticipantCount int           `json:"participant_count"`
+	ItemCount        int           `json:"item_count"`
+	ItemTotal        money.Amount  `json:"item_total"`
+	Tax              *money.Amount `json:"tax,omitempty"`
+	Tip              *money.Amount `json:"tip,omitempty"`
+	YourTotal        *money.Amount `json:"your_total,omitempty"`
+}
+
+// ListMyReceiptsResponse is returned by GET /me/receipts. NextCursor is absent
+// on the last page; pass it back as ?cursor= to fetch the next one.
+type ListMyReceiptsResponse struct {
+	Receipts   []ReceiptSummary `json:"receipts"`
+	NextCursor *string          `json:"next_cursor,omitempty"`
 }

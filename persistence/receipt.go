@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql/driver"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/oklog/ulid/v2"
 )
 
@@ -99,8 +101,42 @@ func GenerateReceiptID() string {
 	return ulid.Make().String()
 }
 
+// touchReceiptTx bumps a receipt's version, which clients poll via ETag to
+// notice edits made by other people on the same bill. Every mutation must call
+// this inside its own transaction so the version and the change land together.
+func touchReceiptTx(ctx context.Context, tx pgx.Tx, receiptID string) error {
+	result, err := tx.Exec(ctx,
+		"UPDATE receipts SET version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $1",
+		receiptID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to bump receipt version: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("receipt %q not found", receiptID)
+	}
+	return nil
+}
+
+// GetReceiptVersion returns a receipt's current version. It doubles as an
+// existence check: a missing receipt yields ErrNoRows, mapped to a not-found
+// error, which is what lets GetReceiptHandler answer a conditional request
+// without running the full read.
+func (c *Client) GetReceiptVersion(ctx context.Context, receiptID string) (int, error) {
+	var version int
+	err := c.db.QueryRow(ctx, "SELECT version FROM receipts WHERE id = $1", receiptID).Scan(&version)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, fmt.Errorf("receipt %q not found", receiptID)
+		}
+		return 0, fmt.Errorf("failed to get receipt version: %w", err)
+	}
+	return version, nil
+}
+
 // SaveReceipt inserts a receipt and its items in a single transaction and
-// returns the persisted Receipt. All optional fields may be nil.
+// returns the persisted Receipt. All optional fields may be nil. When
+// ownerDeviceID is non-nil the receipt is recorded in that device's history.
 func (c *Client) SaveReceipt(
 	ctx context.Context,
 	items []ReceiptItemDB,
@@ -111,6 +147,7 @@ func (c *Client) SaveReceipt(
 	title *string,
 	tax *float64,
 	tip *float64,
+	ownerDeviceID *string,
 ) (*Receipt, error) {
 	receiptID := ulid.Make().String()
 
@@ -134,6 +171,16 @@ func (c *Client) SaveReceipt(
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to insert receipt: %w", err)
+	}
+
+	if ownerDeviceID != nil {
+		_, err = tx.Exec(ctx,
+			"INSERT INTO receipt_devices (receipt_id, device_id, role, joined_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP)",
+			receiptID, *ownerDeviceID, RoleOwner,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to record receipt owner: %w", err)
+		}
 	}
 
 	savedItems := make([]ReceiptItem, 0, len(items))

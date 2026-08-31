@@ -13,6 +13,274 @@ servers:
     description: Local development
 
 paths:
+  /devices:
+    post:
+      summary: Create an anonymous device identity
+      description: |
+        Mints an anonymous identity so a user gets bill history without creating
+        an account. The returned `device_token` is shown **once** — only its hash
+        is stored — so the client must persist it (e.g. localStorage) and send it
+        as the `X-Device-Token` header on subsequent requests. Losing the token
+        loses that device's history.
+
+        Every other endpoint treats the header as optional: a request without it
+        behaves exactly as it did before devices existed.
+      operationId: createDevice
+      responses:
+        '201':
+          description: Device created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CreateDeviceResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /me/receipts:
+    get:
+      summary: List this device's bill history
+      description: |
+        Returns bills this device created or joined, newest first. Summary rows
+        only — fetch `GET /receipts/{receipt_id}` for items and assignments.
+        `your_total` is present when the device has claimed a participant.
+      operationId: listMyReceipts
+      parameters:
+        - $ref: '#/components/parameters/device_token'
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+          description: The `next_cursor` from the previous page (RFC3339).
+      responses:
+        '200':
+          description: The device's bill history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ListMyReceiptsResponse'
+        '400':
+          description: Invalid limit or cursor
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /me/receipts/{receipt_id}:
+    delete:
+      summary: Remove a bill from this device's history
+      description: |
+        Hides the bill from this device only. The receipt itself and the other
+        participants' history are untouched — a shared bill is not any one
+        person's to delete.
+      operationId: deleteMyReceipt
+      parameters:
+        - $ref: '#/components/parameters/receipt_id'
+        - $ref: '#/components/parameters/device_token'
+      responses:
+        '200':
+          description: Removed from history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Receipt is not in this device's history
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /receipts/{receipt_id}/share:
+    post:
+      summary: Create or fetch the receipt's share link
+      description: |
+        Returns a link that friends can open to edit the bill — no account
+        required. Render `url` as a QR code and offer it as "copy link".
+
+        Idempotent: repeat calls return the same active link, so re-opening the
+        share sheet shows a stable QR code instead of invalidating one already
+        sent. Anyone holding the link has full edit access to the bill.
+      operationId: createShareLink
+      parameters:
+        - $ref: '#/components/parameters/receipt_id'
+        - $ref: '#/components/parameters/device_token_optional'
+      responses:
+        '201':
+          description: The receipt's active share link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ShareLinkResponse'
+        '404':
+          description: Receipt not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      summary: Revoke the receipt's share link
+      description: |
+        Deactivates the link. Friends who already joined keep their access and
+        the bill stays in their history — only the link stops working. A later
+        POST mints a fresh link with a new token.
+      operationId: revokeShareLink
+      parameters:
+        - $ref: '#/components/parameters/receipt_id'
+      responses:
+        '200':
+          description: Share link revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: The receipt has no active share link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /join/{token}:
+    post:
+      summary: Open a shared bill
+      description: |
+        Resolves a share token to its receipt and, when `X-Device-Token` is sent,
+        adds the bill to that device's history (`joined: true`). Without a device
+        token the caller can still edit the receipt — it just won't appear in any
+        history. Use the returned `receipt_id` with the normal receipt endpoints.
+      operationId: joinShareLink
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Share token from the share link URL
+        - $ref: '#/components/parameters/device_token_optional'
+      responses:
+        '200':
+          description: Share link resolved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JoinShareLinkResponse'
+        '404':
+          description: The share link is invalid or has been revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /receipts/{receipt_id}/users/{user_id}/claim:
+    post:
+      summary: Claim an existing participant as this device
+      description: |
+        Links an already-created participant to the calling device, for the case
+        where the organiser typed everyone's names in before sharing the link.
+        The claim shows up as `device_id` on that user in `GET /receipts/{id}`,
+        which is how a client recognises which participant is itself. A device
+        may claim at most one participant per receipt.
+
+        To create *and* claim a participant in one call, post to
+        `/receipts/{receipt_id}/users` with `claim: true` instead.
+      operationId: claimReceiptUser
+      parameters:
+        - $ref: '#/components/parameters/receipt_id'
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Receipt user ID to claim
+        - $ref: '#/components/parameters/device_token'
+      responses:
+        '200':
+          description: Participant claimed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Participant not found on this receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: This device already claims another participant on the receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /receipts/image:
     post:
       summary: Upload receipt image
@@ -61,16 +329,41 @@ paths:
         Returns the receipt with users, items, and assignments. Each assignment
         links a user to an item and includes amount_owed, computed as an equal
         split among all users assigned to that item (rounded to whole cents).
+
+        **Polling for collaborators' edits.** This endpoint is conditional. Every
+        response carries an `ETag` derived from a receipt version that every
+        mutation bumps. Poll every few seconds sending the last `ETag` back as
+        `If-None-Match`: an unchanged bill answers `304 Not Modified` after a
+        single row read, and a changed one answers `200` with a new tag. Browser
+        clients can read the header because `ETag` is in
+        `Access-Control-Expose-Headers`.
       operationId: getReceipt
       parameters:
         - $ref: '#/components/parameters/receipt_id'
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: ETag from the previous response, e.g. `"v7"`.
       responses:
         '200':
           description: Receipt with users, items, and assignments
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: Receipt version, e.g. `"v7"`. Send back as If-None-Match.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/GetReceiptResponse'
+        '304':
+          description: The receipt has not changed since the supplied ETag
+          headers:
+            ETag:
+              schema:
+                type: string
         '404':
           description: Receipt not found
           content:
@@ -155,10 +448,17 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
     post:
       summary: Add user to receipt
-      description: Add a participant to a receipt for bill splitting.
+      description: |
+        Add a participant to a receipt for bill splitting.
+
+        Set `claim: true` (with an `X-Device-Token` header) to link the new
+        participant to the calling device — this is what a friend does after
+        opening a share link, and it makes the bill appear in their history.
+        Leave it unset when typing in other people's names.
       operationId: addUserToReceipt
       parameters:
         - $ref: '#/components/parameters/receipt_id'
+        - $ref: '#/components/parameters/device_token_optional'
       requestBody:
         required: true
         content:
@@ -178,8 +478,20 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: claim was requested without a valid X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Receipt not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: This device already claims a participant on the receipt
           content:
             application/json:
               schema:
@@ -276,6 +588,24 @@ components:
         type: string
       description: Receipt ID (ULID)
 
+    device_token:
+      name: X-Device-Token
+      in: header
+      required: true
+      schema:
+        type: string
+      description: Device token from POST /devices.
+
+    device_token_optional:
+      name: X-Device-Token
+      in: header
+      required: false
+      schema:
+        type: string
+      description: |
+        Device token from POST /devices. Optional — the request succeeds without
+        it, but the device-linked behaviour (history, claiming) is skipped.
+
   schemas:
     ErrorResponse:
       type: object
@@ -366,6 +696,13 @@ components:
           type: string
           description: Participant name
           example: "Alice"
+        claim:
+          type: boolean
+          default: false
+          description: |
+            Link the new participant to the calling device, so its client can
+            recognise which person on the bill is itself and the bill shows up
+            in its history. Requires an X-Device-Token header.
 
     AddUserToReceiptResponse:
       type: object
@@ -398,6 +735,12 @@ components:
                 type: string
               name:
                 type: string
+              device_id:
+                type: string
+                nullable: true
+                description: |
+                  The device acting as this participant, if one has claimed them.
+                  Compare with the device_id from POST /devices to find yourself.
               user_total:
                 $ref: '#/components/schemas/MoneyAmount'
                 nullable: true
@@ -428,6 +771,12 @@ components:
                 type: string
               name:
                 type: string
+              device_id:
+                type: string
+                nullable: true
+                description: |
+                  The device acting as this participant, if one has claimed them.
+                  Compare with the device_id from POST /devices to find yourself.
               user_total:
                 $ref: '#/components/schemas/MoneyAmount'
                 nullable: true
@@ -503,3 +852,121 @@ components:
           nullable: true
           description: Tip/gratuity amount
           example: 5.00
+
+    MessageResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: "share link revoked"
+
+    CreateDeviceResponse:
+      type: object
+      properties:
+        device_id:
+          type: string
+          description: Device ID (ULID). Matches device_id on a claimed participant.
+          example: "01J8K2M3N4P5Q6R7S8T9V0W1X2"
+        device_token:
+          type: string
+          description: |
+            Opaque secret, returned once and never again — only its hash is
+            stored. Persist it and send it as X-Device-Token; losing it loses
+            this device's history.
+
+    ShareLinkResponse:
+      type: object
+      properties:
+        receipt_id:
+          type: string
+        token:
+          type: string
+          description: Share token. Prefer `url` for anything user-facing.
+        url:
+          type: string
+          format: uri
+          description: The link to render as a QR code and offer as "copy link".
+          example: "https://splitzies.base44.app/join/XXf7IbRTkp0cubQNuujAHw"
+        created_at:
+          type: string
+          format: date-time
+
+    JoinShareLinkResponse:
+      type: object
+      properties:
+        receipt_id:
+          type: string
+          description: Use this with the normal receipt endpoints.
+        joined:
+          type: boolean
+          description: |
+            True when the bill was added to the calling device's history. False
+            when no X-Device-Token was sent — the caller can still edit the bill.
+        your_user_id:
+          type: string
+          nullable: true
+          description: |
+            The participant this device has already claimed on the bill, if any.
+            When absent, prompt for a name and POST it with claim: true.
+
+    ReceiptSummary:
+      type: object
+      description: One bill in a device's history — headline numbers only.
+      properties:
+        receipt_id:
+          type: string
+        title:
+          type: string
+          nullable: true
+        image_url:
+          type: string
+          format: uri
+          nullable: true
+        receipt_date:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+          description: Last time anyone edited this bill.
+        role:
+          type: string
+          enum: [owner, member]
+          description: owner if this device created the bill, member if it joined via a share link.
+        participant_count:
+          type: integer
+        item_count:
+          type: integer
+          description: Number of individually-assignable item units.
+        item_total:
+          $ref: '#/components/schemas/MoneyAmount'
+          description: Sum of all item amounts, excluding tax and tip.
+        tax:
+          $ref: '#/components/schemas/MoneyAmount'
+          nullable: true
+        tip:
+          $ref: '#/components/schemas/MoneyAmount'
+          nullable: true
+        your_total:
+          $ref: '#/components/schemas/MoneyAmount'
+          nullable: true
+          description: |
+            What this device's claimed participant owes. Absent when the device
+            has not claimed anyone on the bill.
+
+    ListMyReceiptsResponse:
+      type: object
+      properties:
+        receipts:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReceiptSummary'
+        next_cursor:
+          type: string
+          format: date-time
+          nullable: true
+          description: Pass back as ?cursor= for the next page. Absent on the last page.

@@ -24,15 +24,38 @@ func (t *Transport) AddUserToReceiptHandler(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	user, err := t.persistenceClient.AddUserToReceipt(r.Context(), receiptID, req.Name)
+	// Only claim the new participant for this device when explicitly asked, so
+	// an organiser typing in everyone's names doesn't claim the first one.
+	var deviceID *string
+	if req.Claim {
+		deviceID = deviceIDFromContext(r.Context())
+		if deviceID == nil {
+			writeJSONError(w, http.StatusUnauthorized, "device_required",
+				"claim requires a valid "+DeviceTokenHeader+" header; create one with POST /devices", "")
+			return
+		}
+	}
+
+	user, err := t.persistenceClient.AddUserToReceipt(r.Context(), receiptID, req.Name, deviceID)
 	if err != nil {
 		t.log.Error("failed to add user to receipt", "receipt_id", receiptID, "error", err)
 		if isNotFound(err) {
 			writeJSONError(w, http.StatusNotFound, "receipt_not_found", fmt.Sprintf("receipt %q not found", receiptID), "")
 			return
 		}
+		if strings.Contains(err.Error(), "already claims") {
+			writeJSONError(w, http.StatusConflict, "already_claimed", err.Error(), "")
+			return
+		}
 		writeJSONError(w, http.StatusInternalServerError, "add_user_failed", "failed to add user to receipt", "")
 		return
+	}
+
+	// A device that adds itself to a bill should find that bill in its history.
+	if deviceID != nil {
+		if err := t.persistenceClient.AddDeviceToReceipt(r.Context(), receiptID, *deviceID, persistence.RoleMember); err != nil {
+			t.log.Error("failed to add device to receipt", "receipt_id", receiptID, "error", err)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -108,6 +131,7 @@ func (t *Transport) GetReceiptUsersHandler(w http.ResponseWriter, r *http.Reques
 			ID:        u.ID,
 			ReceiptID: u.ReceiptID,
 			Name:      u.Name,
+			DeviceID:  u.DeviceID,
 		}
 	}
 
@@ -152,19 +176,32 @@ func (t *Transport) GetReceiptItemsHandler(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-// GetReceiptHandler handles GET /receipts/{receipt_id}
+// GetReceiptHandler handles GET /receipts/{receipt_id}.
+//
+// This is the endpoint collaborators poll to pick up each other's edits, so it
+// answers conditionally: the receipt's version is served as an ETag, and a
+// matching If-None-Match returns 304 after a single row read, skipping the four
+// queries and the split computation below.
 func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	receiptID := r.PathValue("receipt_id")
 	ctx := r.Context()
 
-	exists, err := t.persistenceClient.ReceiptExists(ctx, receiptID)
+	version, err := t.persistenceClient.GetReceiptVersion(ctx, receiptID)
 	if err != nil {
-		t.log.Error("failed to check receipt existence", "receipt_id", receiptID, "error", err)
+		if isNotFound(err) {
+			writeJSONError(w, http.StatusNotFound, "receipt_not_found", fmt.Sprintf("receipt %q not found", receiptID), "")
+			return
+		}
+		t.log.Error("failed to read receipt version", "receipt_id", receiptID, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to check receipt", "")
 		return
 	}
-	if !exists {
-		writeJSONError(w, http.StatusNotFound, "receipt_not_found", fmt.Sprintf("receipt %q not found", receiptID), "")
+
+	etag := receiptETag(version)
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Cache-Control", "no-cache")
+	if etagMatches(r.Header.Get("If-None-Match"), etag) {
+		w.WriteHeader(http.StatusNotModified)
 		return
 	}
 

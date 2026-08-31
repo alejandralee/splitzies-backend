@@ -75,6 +75,7 @@ func ToGetReceiptResponse(
 			ID:        u.ID,
 			ReceiptID: u.ReceiptID,
 			Name:      u.Name,
+			DeviceID:  u.DeviceID,
 			UserTotal: &amt,
 		}
 	}

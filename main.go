@@ -53,6 +53,11 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// Anonymous device identity — the basis for history without an account.
+	mux.HandleFunc("POST /devices", t.CreateDeviceHandler)
+	mux.HandleFunc("GET /me/receipts", t.ListMyReceiptsHandler)
+	mux.HandleFunc("DELETE /me/receipts/{receipt_id}", t.DeleteMyReceiptHandler)
+
 	// Receipt image upload
 	mux.HandleFunc("POST /receipts/image", t.UploadReceiptImageHandler)
 
@@ -62,8 +67,14 @@ func main() {
 	mux.HandleFunc("GET /receipts/{receipt_id}/items", t.GetReceiptItemsHandler)
 	mux.HandleFunc("GET /receipts/{receipt_id}/users", t.GetReceiptUsersHandler)
 	mux.HandleFunc("POST /receipts/{receipt_id}/users", t.AddUserToReceiptHandler)
+	mux.HandleFunc("POST /receipts/{receipt_id}/users/{user_id}/claim", t.ClaimUserHandler)
 	mux.HandleFunc("POST /receipts/{receipt_id}/users/{user_id}/items", t.AssignItemsToUserHandler)
 	mux.HandleFunc("DELETE /receipts/{receipt_id}/users/{user_id}/items/{item_id}", t.UnassignItemFromUserHandler)
+
+	// Collaboration: share a bill with friends who have no account.
+	mux.HandleFunc("POST /receipts/{receipt_id}/share", t.CreateShareLinkHandler)
+	mux.HandleFunc("DELETE /receipts/{receipt_id}/share", t.RevokeShareLinkHandler)
+	mux.HandleFunc("POST /join/{token}", t.JoinShareLinkHandler)
 
 	// Swagger UI
 	mux.HandleFunc("GET /swagger/docs.html", func(w http.ResponseWriter, r *http.Request) {
@@ -86,7 +97,7 @@ func main() {
 	}
 
 	log.Printf("Server starting on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(mux)))
+	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(t.DeviceMiddleware(mux))))
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
@@ -129,11 +140,14 @@ func corsMiddleware(next http.Handler) http.Handler {
 			w.Header().Set("Access-Control-Allow-Origin", origin)
 			w.Header().Set("Vary", "Origin")
 			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			// Without this the browser hides ETag from JS and conditional
+			// polling silently degrades to a full fetch every time.
+			w.Header().Set("Access-Control-Expose-Headers", "ETag")
 		}
 
 		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,OPTIONS")
-			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
+			w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS")
+			w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Device-Token,If-None-Match")
 			w.Header().Set("Access-Control-Max-Age", "600")
 			w.WriteHeader(http.StatusNoContent)
 			return
