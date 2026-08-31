@@ -18,7 +18,7 @@ type BillSplitResult struct {
 func ComputeBillSplit(items []persistence.ReceiptItem, assignments []persistence.ReceiptUserItem) BillSplitResult {
 	itemPrice := make(map[string]float64)
 	for _, item := range items {
-		itemPrice[item.ID] = item.TotalPrice
+		itemPrice[item.ID] = item.Amount
 	}
 
 	itemUserOrder := make(map[string][]string)
@@ -83,10 +83,11 @@ func ToGetReceiptResponse(
 	for i, item := range items {
 		responseItems[i] = ReceiptItem{
 			ID:           item.ID,
+			GroupID:      item.GroupID,
+			GroupName:    item.GroupName,
 			Name:         item.Name,
-			Quantity:     item.Quantity,
-			TotalPrice:   money.Ptr(&item.TotalPrice, currency),
-			PricePerItem: money.Ptr(&item.PricePerItem, currency),
+			DisplayOrder: item.DisplayOrder,
+			Amount:       money.Ptr(&item.Amount, currency),
 		}
 	}
 
@@ -95,7 +96,6 @@ func ToGetReceiptResponse(
 		key := a.ReceiptUserID + ":" + a.ReceiptItemID
 		amt := money.NewAmount(split.AmountByUserItem[key], currency)
 		responseAssignments[i] = GetReceiptAssignmentResponse{
-			ID:         a.ID,
 			UserID:     a.ReceiptUserID,
 			ItemID:     a.ReceiptItemID,
 			AmountOwed: amt,

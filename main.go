@@ -63,6 +63,7 @@ func main() {
 	mux.HandleFunc("GET /receipts/{receipt_id}/users", t.GetReceiptUsersHandler)
 	mux.HandleFunc("POST /receipts/{receipt_id}/users", t.AddUserToReceiptHandler)
 	mux.HandleFunc("POST /receipts/{receipt_id}/users/{user_id}/items", t.AssignItemsToUserHandler)
+	mux.HandleFunc("DELETE /receipts/{receipt_id}/users/{user_id}/items/{item_id}", t.UnassignItemFromUserHandler)
 
 	// Swagger UI
 	mux.HandleFunc("GET /swagger/docs.html", func(w http.ResponseWriter, r *http.Request) {

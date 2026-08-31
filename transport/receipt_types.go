@@ -5,13 +5,16 @@ import "splitzies/money"
 // defaultUSD is used when GetReceiptCurrency fails or returns nil
 var defaultUSD = "USD"
 
-// ReceiptItem represents a single item in a receipt
+// ReceiptItem represents a single, individually-assignable unit in a receipt.
+// Items sharing a GroupID are grouped for display only (e.g. 3 "Margarita"
+// units) — assignment and splitting always happen per item, never per group.
 type ReceiptItem struct {
 	ID           string        `json:"id"`
+	GroupID      string        `json:"group_id"`
+	GroupName    string        `json:"group_name"`
 	Name         string        `json:"name"`
-	Quantity     int           `json:"quantity"`
-	TotalPrice   *money.Amount `json:"total_price,omitempty"`    // Optional, can be calculated
-	PricePerItem *money.Amount `json:"price_per_item,omitempty"` // Optional, can be calculated
+	DisplayOrder int           `json:"display_order"`
+	Amount       *money.Amount `json:"amount,omitempty"`
 }
 
 // AddReceiptRequest represents the request body for adding a receipt
@@ -64,9 +67,10 @@ type GetReceiptUsersResponse struct {
 	Users []GetReceiptUserResponse `json:"users"`
 }
 
-// GetReceiptAssignmentResponse represents an assignment in the get receipt response
+// GetReceiptAssignmentResponse represents an assignment in the get receipt response.
+// AmountOwed is always server-computed (item amount / number of assignees) —
+// there is no stored per-user override.
 type GetReceiptAssignmentResponse struct {
-	ID         string       `json:"id"`
 	UserID     string       `json:"user_id"`
 	ItemID     string       `json:"item_id"`
 	AmountOwed money.Amount `json:"amount_owed"`
@@ -87,14 +91,13 @@ type AssignItemsToUserRequest struct {
 
 // AssignItemsToUserItem represents an assigned item in the response
 type AssignItemsToUserItem struct {
-	ID            string `json:"id"`
 	ReceiptUserID string `json:"receipt_user_id"`
 	ReceiptItemID string `json:"receipt_item_id"`
 }
 
 // AssignItemsToUserResponse represents the response after assigning items to a user
 type AssignItemsToUserResponse struct {
-	Message string                 `json:"message"`
+	Message string                  `json:"message"`
 	Items   []AssignItemsToUserItem `json:"items"`
 }
 

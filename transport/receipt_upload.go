@@ -167,10 +167,11 @@ func buildUploadReceiptResponse(savedReceipt *persistence.Receipt, imageURL stri
 	for i, item := range savedReceipt.Items {
 		responseItems[i] = ReceiptItem{
 			ID:           item.ID,
+			GroupID:      item.GroupID,
+			GroupName:    item.GroupName,
 			Name:         item.Name,
-			Quantity:     item.Quantity,
-			TotalPrice:   money.Ptr(&item.TotalPrice, currency),
-			PricePerItem: money.Ptr(&item.PricePerItem, currency),
+			DisplayOrder: item.DisplayOrder,
+			Amount:       money.Ptr(&item.Amount, currency),
 		}
 	}
 

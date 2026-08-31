@@ -218,7 +218,7 @@ func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Requ
 
 	assignedItems := make([]AssignItemsToUserItem, 0, len(req.ItemIDs))
 	for _, itemID := range req.ItemIDs {
-		assignment, err := t.persistenceClient.AssignItemToUser(r.Context(), userID, itemID, nil)
+		assignment, err := t.persistenceClient.AssignUserToItem(r.Context(), userID, itemID)
 		if err != nil {
 			t.log.Error("failed to assign item to user", "user_id", userID, "item_id", itemID, "error", err)
 			if isNotFound(err) {
@@ -229,7 +229,6 @@ func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Requ
 			return
 		}
 		assignedItems = append(assignedItems, AssignItemsToUserItem{
-			ID:            assignment.ID,
 			ReceiptUserID: assignment.ReceiptUserID,
 			ReceiptItemID: assignment.ReceiptItemID,
 		})
@@ -245,15 +244,33 @@ func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Requ
 	}
 }
 
+// UnassignItemFromUserHandler handles DELETE /receipts/{receipt_id}/users/{user_id}/items/{item_id}
+func (t *Transport) UnassignItemFromUserHandler(w http.ResponseWriter, r *http.Request) {
+	userID := r.PathValue("user_id")
+	itemID := r.PathValue("item_id")
+
+	if err := t.persistenceClient.UnassignUserFromItem(r.Context(), userID, itemID); err != nil {
+		t.log.Error("failed to unassign item from user", "user_id", userID, "item_id", itemID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "unassign_failed", fmt.Sprintf("failed to unassign item %q from user", itemID), "")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"message": "item unassigned from user successfully"}); err != nil {
+		t.log.Error("failed to encode unassign item response", "error", err)
+	}
+}
+
 func itemsToReceiptItems(items []persistence.ReceiptItem, currency *string) []ReceiptItem {
 	result := make([]ReceiptItem, len(items))
 	for i, item := range items {
 		result[i] = ReceiptItem{
 			ID:           item.ID,
+			GroupID:      item.GroupID,
+			GroupName:    item.GroupName,
 			Name:         item.Name,
-			Quantity:     item.Quantity,
-			TotalPrice:   money.Ptr(&item.TotalPrice, currency),
-			PricePerItem: money.Ptr(&item.PricePerItem, currency),
+			DisplayOrder: item.DisplayOrder,
+			Amount:       money.Ptr(&item.Amount, currency),
 		}
 	}
 	return result
