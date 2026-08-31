@@ -67,6 +67,7 @@ func main() {
 	mux.HandleFunc("GET /receipts/{receipt_id}/items", t.GetReceiptItemsHandler)
 	mux.HandleFunc("GET /receipts/{receipt_id}/users", t.GetReceiptUsersHandler)
 	mux.HandleFunc("POST /receipts/{receipt_id}/users", t.AddUserToReceiptHandler)
+	mux.HandleFunc("DELETE /receipts/{receipt_id}/users/{user_id}", t.RemoveUserFromReceiptHandler)
 	mux.HandleFunc("POST /receipts/{receipt_id}/users/{user_id}/claim", t.ClaimUserHandler)
 	mux.HandleFunc("POST /receipts/{receipt_id}/users/{user_id}/items", t.AssignItemsToUserHandler)
 	mux.HandleFunc("DELETE /receipts/{receipt_id}/users/{user_id}/items/{item_id}", t.UnassignItemFromUserHandler)

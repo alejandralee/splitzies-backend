@@ -503,6 +503,41 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  /receipts/{receipt_id}/users/{user_id}:
+    delete:
+      summary: Remove a participant from a receipt
+      description: |
+        Removes a participant from the bill. Their item assignments are deleted
+        with them, so anything only they had claimed becomes unclaimed again.
+      operationId: removeUserFromReceipt
+      parameters:
+        - $ref: '#/components/parameters/receipt_id'
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Receipt user ID to remove
+      responses:
+        '200':
+          description: Participant removed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Participant not found on this receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /receipts/{receipt_id}/items:
     get:
       summary: Get items on a receipt

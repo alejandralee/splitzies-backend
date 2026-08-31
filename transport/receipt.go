@@ -72,6 +72,27 @@ func (t *Transport) AddUserToReceiptHandler(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+// RemoveUserFromReceiptHandler handles DELETE /receipts/{receipt_id}/users/{user_id}
+func (t *Transport) RemoveUserFromReceiptHandler(w http.ResponseWriter, r *http.Request) {
+	receiptID := r.PathValue("receipt_id")
+	userID := r.PathValue("user_id")
+
+	if err := t.persistenceClient.RemoveUserFromReceipt(r.Context(), receiptID, userID); err != nil {
+		if isNotFound(err) {
+			writeJSONError(w, http.StatusNotFound, "user_not_found", err.Error(), "")
+			return
+		}
+		t.log.Error("failed to remove user from receipt", "receipt_id", receiptID, "user_id", userID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "remove_user_failed", "failed to remove user from receipt", "")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(map[string]string{"message": "user removed from receipt successfully"}); err != nil {
+		t.log.Error("failed to encode remove user response", "error", err)
+	}
+}
+
 // PatchReceiptHandler handles PATCH /receipts/{receipt_id}
 func (t *Transport) PatchReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	receiptID := r.PathValue("receipt_id")

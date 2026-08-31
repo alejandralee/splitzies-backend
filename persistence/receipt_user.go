@@ -87,6 +87,38 @@ func (c *Client) AddUserToReceipt(ctx context.Context, receiptID, name string, d
 	}, nil
 }
 
+// RemoveUserFromReceipt deletes a participant from a receipt. Their item
+// assignments go with them (receipt_item_users cascades on receipt_user_id), so
+// anything they alone had claimed falls back to unclaimed.
+// Returns a not-found error if the participant isn't on that receipt.
+func (c *Client) RemoveUserFromReceipt(ctx context.Context, receiptID, userID string) error {
+	tx, err := c.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	result, err := tx.Exec(ctx,
+		"DELETE FROM receipt_users WHERE id = $1 AND receipt_id = $2",
+		userID, receiptID,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to delete receipt user: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return fmt.Errorf("user %q not found on receipt %q", userID, receiptID)
+	}
+
+	if err := touchReceiptTx(ctx, tx, receiptID); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
+}
+
 // AssignUserToItem assigns an item unit to a user (idempotent — assigning the
 // same user/item pair twice is a no-op, not an error).
 func (c *Client) AssignUserToItem(ctx context.Context, receiptUserID, receiptItemID string) (*ReceiptUserItem, error) {
