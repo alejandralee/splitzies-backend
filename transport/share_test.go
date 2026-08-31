@@ -1,6 +1,9 @@
 package transport
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
 
 func TestShareURL(t *testing.T) {
 	tests := []struct {
@@ -8,11 +11,18 @@ func TestShareURL(t *testing.T) {
 		baseURL string
 		token   string
 		want    string
+		wantErr error
 	}{
 		{
-			name:  "falls back to the production app when unset",
-			token: "abc123",
-			want:  defaultAppBaseURL + "/join/abc123",
+			name:    "refuses to guess a host when unset",
+			token:   "abc123",
+			wantErr: errNoAppBaseURL,
+		},
+		{
+			name:    "refuses a value that is only whitespace",
+			baseURL: "   ",
+			token:   "abc123",
+			wantErr: errNoAppBaseURL,
 		},
 		{
 			name:    "uses APP_BASE_URL when set",
@@ -37,7 +47,11 @@ func TestShareURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("APP_BASE_URL", tt.baseURL)
-			if got := shareURL(tt.token); got != tt.want {
+			got, err := shareURL(tt.token)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("shareURL(%q) error = %v, want %v", tt.token, err, tt.wantErr)
+			}
+			if got != tt.want {
 				t.Errorf("shareURL(%q) = %q, want %q", tt.token, got, tt.want)
 			}
 		})

@@ -11,17 +11,20 @@ import (
 	"splitzies/persistence"
 )
 
-// defaultAppBaseURL is where share links point when APP_BASE_URL is unset.
-const defaultAppBaseURL = "https://splitzies.base44.app"
+// errNoAppBaseURL is returned when APP_BASE_URL is unset. There is deliberately
+// no default: a share link built against a guessed host still scans, still
+// returns 200 from whatever is parked there, and fails only in the friend's
+// hands. Refusing to mint one makes a misconfigured deploy obvious here.
+var errNoAppBaseURL = errors.New("APP_BASE_URL is not set")
 
 // shareURL builds the link a friend opens (and the string the client renders as
 // a QR code) from a share token.
-func shareURL(token string) string {
+func shareURL(token string) (string, error) {
 	base := strings.TrimSuffix(strings.TrimSpace(os.Getenv("APP_BASE_URL")), "/")
 	if base == "" {
-		base = defaultAppBaseURL
+		return "", errNoAppBaseURL
 	}
-	return base + "/join/" + token
+	return base + "/join/" + token, nil
 }
 
 // CreateShareLinkHandler handles POST /receipts/{receipt_id}/share.
@@ -43,12 +46,19 @@ func (t *Transport) CreateShareLinkHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	url, err := shareURL(link.Token)
+	if err != nil {
+		t.log.Error("cannot build share link", "request_id", rid, "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "share_link_failed", "sharing is not configured on this server", rid)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	if err := json.NewEncoder(w).Encode(ShareLinkResponse{
 		ReceiptID: link.ReceiptID,
 		Token:     link.Token,
-		URL:       shareURL(link.Token),
+		URL:       url,
 		CreatedAt: link.CreatedAt,
 	}); err != nil {
 		t.log.Error("failed to encode share link response", "request_id", rid, "error", err)
