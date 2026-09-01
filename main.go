@@ -145,6 +145,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 		"https://v0-splitzies-app-design.vercel.app":                                       {},
 		"https://v0-splitzies-app-design-alejandras-projects-ea2d3c63.vercel.app":          {},
 		"https://v0-splitzies-app-design-git-main-alejandras-projects-ea2d3c63.vercel.app": {},
+		"https://splitzi.co":                                                               {},
+		"https://www.splitzi.co":                                                           {},
 	}
 
 	// Allow localhost origins only in development.
