@@ -137,6 +137,11 @@ func (t *Transport) parseOCRForReceipt(ctx context.Context, rid string, fileData
 func (t *Transport) validateReceiptImageRequest(w http.ResponseWriter, r *http.Request) (io.ReadCloser, string, error) {
 	rid := requestID(r)
 
+	// Cap the whole request body, not just the file field, so a client can't
+	// force us to buffer an oversized multipart body before we ever get to
+	// check header.Size.
+	r.Body = http.MaxBytesReader(w, r.Body, 12<<20)
+
 	if err := r.ParseMultipartForm(10 << 20); err != nil {
 		t.log.Warn("failed to parse multipart form", "request_id", rid, "error", err)
 		writeJSONError(w, http.StatusBadRequest, "invalid_multipart_form", "failed to parse multipart form", rid)
