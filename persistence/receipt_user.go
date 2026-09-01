@@ -33,10 +33,12 @@ type ReceiptUserItem struct {
 	CreatedAt     time.Time
 }
 
-// ReceiptTaxTip holds optional tax and tip amounts for a receipt.
-type ReceiptTaxTip struct {
-	Tax *float64
-	Tip *float64
+// ReceiptExtras holds the optional tax/tip amounts and the extras_mode
+// governing how they're divided among participants.
+type ReceiptExtras struct {
+	Tax        *float64
+	Tip        *float64
+	ExtrasMode string
 }
 
 // AddUserToReceipt creates a new user entry on a receipt. When deviceID is
@@ -323,21 +325,23 @@ func (c *Client) GetReceiptCurrency(ctx context.Context, receiptID string) (*str
 	return currency, nil
 }
 
-// GetReceiptTaxTip returns the tax and tip amounts for a receipt.
-func (c *Client) GetReceiptTaxTip(ctx context.Context, receiptID string) (*ReceiptTaxTip, error) {
+// GetReceiptExtras returns the tax, tip, and extras_mode for a receipt.
+func (c *Client) GetReceiptExtras(ctx context.Context, receiptID string) (*ReceiptExtras, error) {
 	var tax, tip *float64
-	err := c.db.QueryRow(ctx, "SELECT tax, tip FROM receipts WHERE id = $1", receiptID).Scan(&tax, &tip)
+	var extrasMode string
+	err := c.db.QueryRow(ctx, "SELECT tax, tip, extras_mode FROM receipts WHERE id = $1", receiptID).Scan(&tax, &tip, &extrasMode)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fmt.Errorf("receipt %q not found", receiptID)
 		}
-		return nil, fmt.Errorf("failed to get receipt tax/tip: %w", err)
+		return nil, fmt.Errorf("failed to get receipt extras: %w", err)
 	}
-	return &ReceiptTaxTip{Tax: tax, Tip: tip}, nil
+	return &ReceiptExtras{Tax: tax, Tip: tip, ExtrasMode: extrasMode}, nil
 }
 
-// UpdateReceiptTaxTip updates the tax and/or tip on a receipt. At least one must be non-nil.
-func (c *Client) UpdateReceiptTaxTip(ctx context.Context, receiptID string, tax, tip *float64) error {
+// UpdateReceiptExtras updates the tax, tip, and/or extras_mode on a receipt.
+// At least one of the three must be non-nil.
+func (c *Client) UpdateReceiptExtras(ctx context.Context, receiptID string, tax, tip *float64, extrasMode *string) error {
 	var setClauses []string
 	var args []interface{}
 	n := 1
@@ -351,12 +355,17 @@ func (c *Client) UpdateReceiptTaxTip(ctx context.Context, receiptID string, tax,
 		args = append(args, *tip)
 		n++
 	}
+	if extrasMode != nil {
+		setClauses = append(setClauses, fmt.Sprintf("extras_mode = $%d", n))
+		args = append(args, *extrasMode)
+		n++
+	}
 	if len(setClauses) == 0 {
-		return fmt.Errorf("at least one of tax or tip must be provided")
+		return fmt.Errorf("at least one of tax, tip, or extras_mode must be provided")
 	}
 	args = append(args, receiptID)
 
-	// Bump the version in the same statement so pollers see the tax/tip change.
+	// Bump the version in the same statement so pollers see the change.
 	query := fmt.Sprintf(
 		"UPDATE receipts SET %s, version = version + 1, updated_at = CURRENT_TIMESTAMP WHERE id = $%d",
 		strings.Join(setClauses, ", "), n,

@@ -35,6 +35,11 @@ func NewClient(ctx context.Context, databaseURL string) (*Client, error) {
 	return &Client{db: pool}, nil
 }
 
+// Ping verifies the database connection is alive.
+func (c *Client) Ping(ctx context.Context) error {
+	return c.db.Ping(ctx)
+}
+
 // Close drains and closes all pool connections.
 func (c *Client) Close(_ context.Context) error {
 	if c.db != nil {

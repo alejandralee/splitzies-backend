@@ -92,6 +92,9 @@ type GetReceiptResponse struct {
 	Users       []GetReceiptUserResponse       `json:"users"`
 	Items       []ReceiptItem                  `json:"items"`
 	Assignments []GetReceiptAssignmentResponse `json:"assignments"`
+	Tax         *money.Amount                  `json:"tax,omitempty"`
+	Tip         *money.Amount                  `json:"tip,omitempty"`
+	ExtrasMode  string                         `json:"extras_mode"`
 }
 
 // AssignItemsToUserRequest represents the request body for assigning items to a user
@@ -111,10 +114,28 @@ type AssignItemsToUserResponse struct {
 	Items   []AssignItemsToUserItem `json:"items"`
 }
 
-// PatchReceiptRequest represents the request body for updating receipt tax/tip
+// PatchReceiptRequest represents the request body for updating receipt tax/tip/extras_mode
 type PatchReceiptRequest struct {
-	Tax *float64 `json:"tax"`
-	Tip *float64 `json:"tip"`
+	Tax        *float64 `json:"tax"`
+	Tip        *float64 `json:"tip"`
+	ExtrasMode *string  `json:"extras_mode"`
+}
+
+// CreateReceiptItemRequest represents the request body for adding a unit to a receipt.
+// When GroupID is set, the unit joins that existing group and Name/Amount are
+// ignored — the new unit adopts the group's name and price. When GroupID is
+// nil, Name and Amount are required and a new group is created.
+type CreateReceiptItemRequest struct {
+	Name    string   `json:"name"`
+	Amount  *float64 `json:"amount"`
+	GroupID *string  `json:"group_id,omitempty"`
+}
+
+// PatchReceiptItemGroupRequest represents the request body for editing a
+// group's name and/or unit amount. Applies to every unit in the group.
+type PatchReceiptItemGroupRequest struct {
+	Name   *string  `json:"name"`
+	Amount *float64 `json:"amount"`
 }
 
 // CreateDeviceResponse is returned by POST /devices. DeviceToken is shown once

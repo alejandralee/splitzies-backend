@@ -9,10 +9,13 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"splitzies/persistence"
 	"splitzies/storage"
 	tr "splitzies/transport"
+
+	"golang.org/x/time/rate"
 )
 
 //go:embed swagger/docs.html swagger.yaml
@@ -53,18 +56,26 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	// Health check for deploy/restart orchestration.
+	mux.HandleFunc("GET /healthz", t.HealthHandler)
+
 	// Anonymous device identity — the basis for history without an account.
 	mux.HandleFunc("POST /devices", t.CreateDeviceHandler)
 	mux.HandleFunc("GET /me/receipts", t.ListMyReceiptsHandler)
 	mux.HandleFunc("DELETE /me/receipts/{receipt_id}", t.DeleteMyReceiptHandler)
 
-	// Receipt image upload
-	mux.HandleFunc("POST /receipts/image", t.UploadReceiptImageHandler)
+	// Receipt image upload — tightly rate limited, since each call pays for
+	// Vision OCR + Gemini parsing.
+	imageUploadLimiter := tr.RateLimitMiddleware(rate.Every(10*time.Second), 3)
+	mux.Handle("POST /receipts/image", imageUploadLimiter(http.HandlerFunc(t.UploadReceiptImageHandler)))
 
 	// Receipt CRUD
 	mux.HandleFunc("GET /receipts/{receipt_id}", t.GetReceiptHandler)
 	mux.HandleFunc("PATCH /receipts/{receipt_id}", t.PatchReceiptHandler)
 	mux.HandleFunc("GET /receipts/{receipt_id}/items", t.GetReceiptItemsHandler)
+	mux.HandleFunc("POST /receipts/{receipt_id}/items", t.CreateReceiptItemHandler)
+	mux.HandleFunc("DELETE /receipts/{receipt_id}/items/{item_id}", t.DeleteReceiptItemHandler)
+	mux.HandleFunc("PATCH /receipts/{receipt_id}/item-groups/{group_id}", t.PatchReceiptItemGroupHandler)
 	mux.HandleFunc("GET /receipts/{receipt_id}/users", t.GetReceiptUsersHandler)
 	mux.HandleFunc("POST /receipts/{receipt_id}/users", t.AddUserToReceiptHandler)
 	mux.HandleFunc("DELETE /receipts/{receipt_id}/users/{user_id}", t.RemoveUserFromReceiptHandler)
@@ -97,15 +108,43 @@ func main() {
 		port = "8080"
 	}
 
+	// General per-IP ceiling so a single client can't hammer the API.
+	generalLimiter := tr.RateLimitMiddleware(rate.Limit(10), 20)
+
 	log.Printf("Server starting on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, corsMiddleware(t.DeviceMiddleware(mux))))
+	log.Fatal(http.ListenAndServe(":"+port, securityHeadersMiddleware(corsMiddleware(generalLimiter(t.DeviceMiddleware(mux))))))
+}
+
+// securityHeadersMiddleware sets baseline hardening headers and, in
+// production, enforces HTTPS. Heroku's router terminates TLS and forwards
+// plaintext to the dyno, so "is this request HTTPS" has to be read from
+// X-Forwarded-Proto rather than r.TLS.
+func securityHeadersMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if os.Getenv("ENV") != "development" && os.Getenv("ENV") != "dev" {
+			if proto := r.Header.Get("X-Forwarded-Proto"); proto != "" && proto != "https" {
+				target := "https://" + r.Host + r.URL.RequestURI()
+				http.Redirect(w, r, target, http.StatusMovedPermanently)
+				return
+			}
+			w.Header().Set("Strict-Transport-Security", "max-age=63072000; includeSubDomains")
+		}
+
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
+
+		next.ServeHTTP(w, r)
+	})
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
-	// exactOrigins covers production; base44 preview URLs are handled by the
-	// wildcard suffix check below so they don't need to be listed individually.
+	// Exact-match allowlist only — no wildcard trust of entire hosting
+	// platforms. Add preview/staging URLs via CORS_ALLOWED_ORIGINS as needed.
 	exactOrigins := map[string]struct{}{
-		"https://splitzies.base44.app": {},
+		"https://v0-splitzies-app-design.vercel.app":                                       {},
+		"https://v0-splitzies-app-design-alejandras-projects-ea2d3c63.vercel.app":          {},
+		"https://v0-splitzies-app-design-git-main-alejandras-projects-ea2d3c63.vercel.app": {},
 	}
 
 	// Allow localhost origins only in development.
@@ -123,16 +162,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 	}
 
 	isAllowed := func(origin string) bool {
-		if _, ok := exactOrigins[origin]; ok {
-			return true
-		}
-		// Allow any subdomain of known preview hosting platforms (https only).
-		for _, suffix := range []string{".base44.app", ".vusercontent.net", ".vercel.app"} {
-			if strings.HasPrefix(origin, "https://") && strings.HasSuffix(origin, suffix) {
-				return true
-			}
-		}
-		return false
+		_, ok := exactOrigins[origin]
+		return ok
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

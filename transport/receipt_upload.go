@@ -31,7 +31,9 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	imageURL, err := t.gcsClient.UploadReceiptImageFromReader(ctx, bytes.NewReader(fileData), persistence.GenerateReceiptID(), contentType)
+	uploadCtx, cancel := context.WithTimeout(ctx, gcsUploadTimeout)
+	imageURL, err := t.gcsClient.UploadReceiptImageFromReader(uploadCtx, bytes.NewReader(fileData), persistence.GenerateReceiptID(), contentType)
+	cancel()
 	if err != nil {
 		t.log.Error("failed to upload receipt image", "request_id", rid, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "receipt_image_upload_failed", "failed to upload receipt image", rid)
@@ -71,10 +73,21 @@ type ocrParseResult struct {
 	tip         *float64
 }
 
+// visionTimeout and geminiTimeout bound the two external calls in the OCR
+// pipeline so a slow/hung upstream can't tie up a request indefinitely.
+const (
+	gcsUploadTimeout = 15 * time.Second
+	visionTimeout    = 15 * time.Second
+	geminiTimeout    = 20 * time.Second
+)
+
 // parseOCRForReceipt performs OCR on the image bytes then parses the result with Gemini.
 // Returns nil if OCR produces no text; falls back to regex parsing if Gemini fails.
 func (t *Transport) parseOCRForReceipt(ctx context.Context, rid string, fileData []byte) *ocrParseResult {
-	ocrText, err := t.visionClient.PerformOCRFromBytes(ctx, fileData)
+	visionCtx, cancel := context.WithTimeout(ctx, visionTimeout)
+	defer cancel()
+
+	ocrText, err := t.visionClient.PerformOCRFromBytes(visionCtx, fileData)
 	if err != nil {
 		t.log.Error("receipt OCR request failed", "request_id", rid, "error", err)
 		return nil
@@ -88,7 +101,10 @@ func (t *Transport) parseOCRForReceipt(ctx context.Context, rid string, fileData
 		ocrTextData: &persistence.OCRTextData{Text: ocrText},
 	}
 
-	parsed, parseErr := storage.ParseReceiptItemsWithGemini(ctx, ocrText)
+	geminiCtx, cancel := context.WithTimeout(ctx, geminiTimeout)
+	defer cancel()
+
+	parsed, parseErr := storage.ParseReceiptItemsWithGemini(geminiCtx, ocrText)
 	if parseErr != nil {
 		t.log.Error("Gemini receipt parse failed, falling back to regex", "request_id", rid, "error", parseErr)
 		parsed.Items = storage.ExtractReceiptItemsFromText(ocrText)
@@ -120,6 +136,11 @@ func (t *Transport) parseOCRForReceipt(ctx context.Context, rid string, fileData
 
 func (t *Transport) validateReceiptImageRequest(w http.ResponseWriter, r *http.Request) (io.ReadCloser, string, error) {
 	rid := requestID(r)
+
+	// Cap the whole request body, not just the file field, so a client can't
+	// force us to buffer an oversized multipart body before we ever get to
+	// check header.Size.
+	r.Body = http.MaxBytesReader(w, r.Body, 12<<20)
 
 	if err := r.ParseMultipartForm(10 << 20); err != nil {
 		t.log.Warn("failed to parse multipart form", "request_id", rid, "error", err)

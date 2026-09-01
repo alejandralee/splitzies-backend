@@ -46,6 +46,34 @@ func TestComputeBillSplit_EvenSplitAmongAssignees(t *testing.T) {
 	}
 }
 
+func TestToGetReceiptResponse_ExtrasDefaultsToProportionalWhenNil(t *testing.T) {
+	response := ToGetReceiptResponse("receipt-1", nil, nil, nil, BillSplitResult{}, nil, nil)
+
+	if response.ExtrasMode != "proportional" {
+		t.Errorf("ExtrasMode = %q, want %q", response.ExtrasMode, "proportional")
+	}
+	if response.Tax != nil || response.Tip != nil {
+		t.Errorf("Tax/Tip = %v/%v, want nil/nil when extras is nil", response.Tax, response.Tip)
+	}
+}
+
+func TestToGetReceiptResponse_CarriesExtrasThrough(t *testing.T) {
+	tax, tip := 1.5, 5.0
+	extras := &persistence.ReceiptExtras{Tax: &tax, Tip: &tip, ExtrasMode: "even"}
+
+	response := ToGetReceiptResponse("receipt-1", nil, nil, nil, BillSplitResult{}, nil, extras)
+
+	if response.ExtrasMode != "even" {
+		t.Errorf("ExtrasMode = %q, want %q", response.ExtrasMode, "even")
+	}
+	if response.Tax == nil || response.Tax.Value != 1.5 {
+		t.Errorf("Tax = %v, want 1.5", response.Tax)
+	}
+	if response.Tip == nil || response.Tip.Value != 5.0 {
+		t.Errorf("Tip = %v, want 5.0", response.Tip)
+	}
+}
+
 func TestComputeBillSplit_UnassignedItemExcluded(t *testing.T) {
 	items := []persistence.ReceiptItem{
 		{ID: "item-1", Name: "Soda", Amount: 3},
