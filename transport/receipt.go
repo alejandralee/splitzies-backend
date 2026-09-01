@@ -102,13 +102,18 @@ func (t *Transport) PatchReceiptHandler(w http.ResponseWriter, r *http.Request) 
 		writeJSONError(w, http.StatusBadRequest, "invalid_body", "failed to parse request body", "")
 		return
 	}
-	if req.Tax == nil && req.Tip == nil {
-		writeJSONError(w, http.StatusBadRequest, "missing_field", "at least one of tax or tip is required", "")
+	if req.Tax == nil && req.Tip == nil && req.ExtrasMode == nil {
+		writeJSONError(w, http.StatusBadRequest, "missing_field", "at least one of tax, tip, or extras_mode is required", "")
+		return
+	}
+	if req.ExtrasMode != nil && *req.ExtrasMode != "proportional" && *req.ExtrasMode != "even" {
+		writeJSONError(w, http.StatusBadRequest, "invalid_field",
+			newValidationError("extras_mode", `must be "proportional" or "even"`).Error(), "")
 		return
 	}
 
-	if err := t.persistenceClient.UpdateReceiptTaxTip(r.Context(), receiptID, req.Tax, req.Tip); err != nil {
-		t.log.Error("failed to update receipt tax/tip", "receipt_id", receiptID, "error", err)
+	if err := t.persistenceClient.UpdateReceiptExtras(r.Context(), receiptID, req.Tax, req.Tip, req.ExtrasMode); err != nil {
+		t.log.Error("failed to update receipt extras", "receipt_id", receiptID, "error", err)
 		if isNotFound(err) {
 			writeJSONError(w, http.StatusNotFound, "receipt_not_found", fmt.Sprintf("receipt %q not found", receiptID), "")
 			return
@@ -251,8 +256,15 @@ func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
 		currency = &defaultUSD
 	}
 
+	extras, err := t.persistenceClient.GetReceiptExtras(ctx, receiptID)
+	if err != nil {
+		t.log.Error("failed to get receipt extras", "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to get receipt", "")
+		return
+	}
+
 	split := ComputeBillSplit(items, assignments)
-	response := ToGetReceiptResponse(receiptID, users, items, assignments, split, currency)
+	response := ToGetReceiptResponse(receiptID, users, items, assignments, split, currency, extras)
 
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(response); err != nil {

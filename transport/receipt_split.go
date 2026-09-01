@@ -66,6 +66,7 @@ func ToGetReceiptResponse(
 	assignments []persistence.ReceiptUserItem,
 	split BillSplitResult,
 	currency *string,
+	extras *persistence.ReceiptExtras,
 ) GetReceiptResponse {
 	responseUsers := make([]GetReceiptUserResponse, len(users))
 	for i, u := range users {
@@ -103,10 +104,17 @@ func ToGetReceiptResponse(
 		}
 	}
 
-	return GetReceiptResponse{
+	response := GetReceiptResponse{
 		ReceiptID:   receiptID,
 		Users:       responseUsers,
 		Items:       responseItems,
 		Assignments: responseAssignments,
+		ExtrasMode:  "proportional",
 	}
+	if extras != nil {
+		response.Tax = money.Ptr(extras.Tax, currency)
+		response.Tip = money.Ptr(extras.Tip, currency)
+		response.ExtrasMode = extras.ExtrasMode
+	}
+	return response
 }

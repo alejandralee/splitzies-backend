@@ -377,10 +377,11 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
     patch:
-      summary: Update receipt tax and tip
+      summary: Update receipt tax, tip, and/or extras_mode
       description: |
-        Update tax and/or tip on a receipt. Use when values were not parsed
-        from the receipt during upload. Only provided fields are updated.
+        Update tax, tip, and/or extras_mode on a receipt. Use tax/tip when
+        values were not parsed from the receipt during upload. Only provided
+        fields are updated.
       operationId: patchReceipt
       parameters:
         - $ref: '#/components/parameters/receipt_id'
@@ -402,7 +403,7 @@ paths:
                     type: string
                     example: "receipt updated successfully"
         '400':
-          description: Invalid request (must include at least one of tax or tip)
+          description: Invalid request (must include at least one of tax, tip, or extras_mode; extras_mode must be proportional or even)
           content:
             application/json:
               schema:
@@ -564,6 +565,128 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+    post:
+      summary: Add a unit to a receipt
+      description: |
+        Creates one individually-assignable unit. Pass group_id to add a unit
+        to an existing group (the quantity stepper's "+"), or omit it to start
+        a new group with this unit as its first member.
+      operationId: createReceiptItem
+      parameters:
+        - $ref: '#/components/parameters/receipt_id'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateReceiptItemRequest'
+      responses:
+        '201':
+          description: Item created successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReceiptItem'
+        '400':
+          description: Invalid request (missing name/amount when group_id is not set)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Receipt or group not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /receipts/{receipt_id}/items/{item_id}:
+    delete:
+      summary: Delete a unit from a receipt
+      description: |
+        Deletes a single unit; its assignments are deleted with it. If it was
+        the last unit in its group, the now-empty group is removed too.
+      operationId: deleteReceiptItem
+      parameters:
+        - $ref: '#/components/parameters/receipt_id'
+        - name: item_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Receipt item ID to delete
+      responses:
+        '200':
+          description: Item deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '404':
+          description: Item not found on this receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /receipts/{receipt_id}/item-groups/{group_id}:
+    patch:
+      summary: Update a group's name and/or unit price
+      description: |
+        Updates apply to every unit in the group at once, since the review
+        screen edits name and price per group rather than per unit.
+      operationId: patchReceiptItemGroup
+      parameters:
+        - $ref: '#/components/parameters/receipt_id'
+        - name: group_id
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Item group ID to update
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PatchReceiptItemGroupRequest'
+      responses:
+        '200':
+          description: Item group updated successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MessageResponse'
+        '400':
+          description: Invalid request (must include at least one of name or amount)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Item group not found on this receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /receipts/{receipt_id}/users/{user_id}/items:
     post:
@@ -677,22 +800,30 @@ components:
 
     ReceiptItem:
       type: object
+      description: |
+        A single, individually-assignable unit. Items sharing group_id are
+        grouped for display only (e.g. 3 "Margarita" units) — assignment and
+        splitting always happen per item, never per group.
       properties:
         id:
           type: string
           description: Item ID (ULID)
+        group_id:
+          type: string
+          description: Groups units that display together (e.g. quantity 3 of the same item)
+        group_name:
+          type: string
+          description: Display name of the group
         name:
           type: string
           description: Item name
-        quantity:
+        display_order:
           type: integer
-          description: Quantity
-        total_price:
+          description: Sort order within the receipt
+        amount:
           $ref: '#/components/schemas/MoneyAmount'
           nullable: true
-        price_per_item:
-          $ref: '#/components/schemas/MoneyAmount'
-          nullable: true
+          description: Per-unit price
 
     UploadReceiptResponse:
       type: object
@@ -837,6 +968,22 @@ components:
                 type: string
               amount_owed:
                 $ref: '#/components/schemas/MoneyAmount'
+        tax:
+          $ref: '#/components/schemas/MoneyAmount'
+          nullable: true
+        tip:
+          $ref: '#/components/schemas/MoneyAmount'
+          nullable: true
+        extras_mode:
+          type: string
+          enum: [proportional, even]
+          description: |
+            How tax/tip should be divided among participants. proportional
+            (default) divides each person's share by their claimed subtotal
+            over the full item subtotal, leaving an unclaimed item's tax/tip
+            unassigned; even splits tax/tip equally across all participants
+            regardless of what they claimed. This is a client-side computation
+            — the server only stores and returns the setting.
 
     AssignItemsToUserRequest:
       type: object
@@ -872,7 +1019,7 @@ components:
 
     PatchReceiptRequest:
       type: object
-      description: At least one of tax or tip must be provided
+      description: At least one of tax, tip, or extras_mode must be provided
       minProperties: 1
       properties:
         tax:
@@ -887,6 +1034,47 @@ components:
           nullable: true
           description: Tip/gratuity amount
           example: 5.00
+        extras_mode:
+          type: string
+          enum: [proportional, even]
+          description: How tax/tip should be divided among participants
+
+    CreateReceiptItemRequest:
+      type: object
+      description: |
+        When group_id is set, the new unit joins that existing group and
+        adopts its name and price — name/amount are ignored. When group_id is
+        omitted, name and amount are required and a new group is created.
+      properties:
+        name:
+          type: string
+          description: Required when group_id is not set
+          example: "Margarita"
+        amount:
+          type: number
+          format: double
+          description: Required when group_id is not set
+          example: 12.00
+        group_id:
+          type: string
+          nullable: true
+          description: Existing group to add this unit to
+
+    PatchReceiptItemGroupRequest:
+      type: object
+      description: |
+        At least one of name or amount must be provided. Applies to every unit
+        in the group — the review screen edits a group's name and price as one,
+        not per unit.
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          nullable: true
+        amount:
+          type: number
+          format: double
+          nullable: true
 
     MessageResponse:
       type: object
