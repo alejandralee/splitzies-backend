@@ -51,8 +51,20 @@ func main() {
 	}
 	defer visionClient.Close()
 
+	geminiClient, err := storage.NewGeminiClient(ctx)
+	if err != nil {
+		log.Fatalf("failed to create Gemini client: %v", err)
+	}
+
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	t := tr.NewTransport(logger, db, gcsClient, visionClient)
+
+	// Rollback switch for the receipt parse pipeline: unset (or "image") reads
+	// the uploaded image with Gemini directly; "ocr" restores the previous
+	// Cloud Vision OCR -> Gemini text pipeline. GEMINI_MODEL overrides the
+	// model. Both take effect on restart, with no deploy.
+	receiptParseMode := os.Getenv("RECEIPT_PARSE_MODE")
+	t := tr.NewTransport(logger, db, gcsClient, visionClient, geminiClient, receiptParseMode)
+	logger.Info("receipt parsing configured", "mode", t.ReceiptParseMode(), "model", geminiClient.Model())
 
 	mux := http.NewServeMux()
 
@@ -64,8 +76,8 @@ func main() {
 	mux.HandleFunc("GET /me/receipts", t.ListMyReceiptsHandler)
 	mux.HandleFunc("DELETE /me/receipts/{receipt_id}", t.DeleteMyReceiptHandler)
 
-	// Receipt image upload — tightly rate limited, since each call pays for
-	// Vision OCR + Gemini parsing.
+	// Receipt image upload — tightly rate limited, since each call pays for a
+	// Gemini vision request (plus Vision OCR on the fallback path).
 	imageUploadLimiter := tr.RateLimitMiddleware(rate.Every(10*time.Second), 3)
 	mux.Handle("POST /receipts/image", imageUploadLimiter(http.HandlerFunc(t.UploadReceiptImageHandler)))
 
@@ -145,8 +157,8 @@ func corsMiddleware(next http.Handler) http.Handler {
 		"https://v0-splitzies-app-design.vercel.app":                                       {},
 		"https://v0-splitzies-app-design-alejandras-projects-ea2d3c63.vercel.app":          {},
 		"https://v0-splitzies-app-design-git-main-alejandras-projects-ea2d3c63.vercel.app": {},
-		"https://splitzi.co":                                                               {},
-		"https://www.splitzi.co":                                                           {},
+		"https://splitzi.co":     {},
+		"https://www.splitzi.co": {},
 	}
 
 	// Allow localhost origins only in development.

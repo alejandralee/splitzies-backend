@@ -113,8 +113,47 @@ This will create two files:
 
 - `GET /` - Hello world endpoint
 - `POST /receipts` - Add a receipt
-- `POST /receipts/image` - Upload a receipt image (Vision OCR)
-- `POST /receipts/document-ai` - Upload a receipt image/PDF (Document AI receipt processor)
+- `POST /receipts/image` - Upload a receipt image (parsed by Gemini)
+
+## Receipt parsing
+
+`POST /receipts/image` sends the uploaded image straight to Gemini on Vertex AI,
+which reads the receipt and returns structured items, tax, tip, title, currency
+and date in one call. Keeping the image intact preserves the column layout that
+tells us which price belongs to which line item.
+
+If that call fails or returns no items, the request automatically falls back to
+the older pipeline: Cloud Vision `DOCUMENT_TEXT_DETECTION`, then Gemini over the
+extracted text, then a regex parser as a last resort.
+
+Configuration:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GEMINI_MODEL` | `gemini-3.1-flash-lite` | Model used for parsing. Set to `gemini-2.5-flash` to restore the previous model. |
+| `RECEIPT_PARSE_MODE` | `image` | Set to `ocr` to skip the image path entirely and use only the Cloud Vision OCR pipeline. |
+| `VERTEX_AI_LOCATION` | `global` | Vertex AI region. |
+| `GCP_PROJECT_ID` | — | Required (falls back to `GOOGLE_CLOUD_PROJECT`). |
+| `GOOGLE_APPLICATION_CREDENTIALS_JSON` | — | Required service account JSON, used for Vertex AI, Vision and GCS. |
+
+### Rolling back
+
+Both switches apply on restart, no deploy needed:
+
+```bash
+# Full rollback to the previous Vision OCR + Gemini 2.5 Flash behaviour
+heroku config:set RECEIPT_PARSE_MODE=ocr GEMINI_MODEL=gemini-2.5-flash
+
+# Keep the image path, but on the older model
+heroku config:set GEMINI_MODEL=gemini-2.5-flash
+
+# Back to the default
+heroku config:unset RECEIPT_PARSE_MODE GEMINI_MODEL
+```
+
+The startup log line `receipt parsing configured mode=... model=...` confirms
+which pipeline a running dyno is using, and every upload logs the model plus
+whether it fell back.
 
 ## Database
 

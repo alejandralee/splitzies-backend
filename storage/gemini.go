@@ -4,12 +4,23 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 
 	"cloud.google.com/go/auth/credentials"
 	"google.golang.org/genai"
+)
+
+const (
+	// DefaultGeminiModel reads receipt images directly. Overridable with
+	// GEMINI_MODEL so the model can be changed (or rolled back to
+	// LegacyGeminiModel) by restarting with a different env var, no deploy.
+	DefaultGeminiModel = "gemini-3.1-flash-lite"
+
+	// LegacyGeminiModel is what the Vision-OCR-then-parse pipeline used.
+	LegacyGeminiModel = "gemini-2.5-flash"
 )
 
 type geminiReceiptItem struct {
@@ -21,12 +32,12 @@ type geminiReceiptItem struct {
 
 type geminiReceiptData struct {
 	Items       []geminiReceiptItem `json:"items"`
-	Currency    *string            `json:"currency"`
-	Date        *string            `json:"date"`
-	ReceiptDate *string            `json:"receipt_date"`
-	Title       *string            `json:"title"`
-	Tax         *float64           `json:"tax"`
-	Tip         *float64           `json:"tip"`
+	Currency    *string             `json:"currency"`
+	Date        *string             `json:"date"`
+	ReceiptDate *string             `json:"receipt_date"`
+	Title       *string             `json:"title"`
+	Tax         *float64            `json:"tax"`
+	Tip         *float64            `json:"tip"`
 }
 
 type GeminiReceiptParseResult struct {
@@ -38,16 +49,18 @@ type GeminiReceiptParseResult struct {
 	Tip         *float64
 }
 
-// ParseReceiptItemsWithGemini parses OCR text into receipt items using Gemini.
-func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) (GeminiReceiptParseResult, error) {
-	var empty GeminiReceiptParseResult
-	if strings.TrimSpace(ocrText) == "" {
-		return empty, fmt.Errorf("ocr text is empty")
-	}
+// GeminiClient holds a Vertex AI client. Build it once at startup: credential
+// detection and client construction are far too expensive to repeat on every
+// upload, which is what the old package-level parse function did.
+type GeminiClient struct {
+	client *genai.Client
+	model  string
+}
 
+func NewGeminiClient(ctx context.Context) (*GeminiClient, error) {
 	credsJSON := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
 	if credsJSON == "" {
-		return empty, fmt.Errorf("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable is not set")
+		return nil, fmt.Errorf("GOOGLE_APPLICATION_CREDENTIALS_JSON environment variable is not set")
 	}
 
 	projectID := os.Getenv("GCP_PROJECT_ID")
@@ -55,7 +68,7 @@ func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) (GeminiRec
 		projectID = os.Getenv("GOOGLE_CLOUD_PROJECT")
 	}
 	if projectID == "" {
-		return empty, fmt.Errorf("GCP_PROJECT_ID environment variable is not set")
+		return nil, fmt.Errorf("GCP_PROJECT_ID environment variable is not set")
 	}
 
 	location := os.Getenv("VERTEX_AI_LOCATION")
@@ -63,12 +76,17 @@ func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) (GeminiRec
 		location = "global"
 	}
 
+	model := strings.TrimSpace(os.Getenv("GEMINI_MODEL"))
+	if model == "" {
+		model = DefaultGeminiModel
+	}
+
 	creds, err := credentials.DetectDefault(&credentials.DetectOptions{
 		CredentialsJSON: []byte(credsJSON),
 		Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
 	})
 	if err != nil {
-		return empty, fmt.Errorf("failed to load Google credentials: %w", err)
+		return nil, fmt.Errorf("failed to load Google credentials: %w", err)
 	}
 
 	client, err := genai.NewClient(ctx, &genai.ClientConfig{
@@ -78,46 +96,79 @@ func ParseReceiptItemsWithGemini(ctx context.Context, ocrText string) (GeminiRec
 		Credentials: creds,
 	})
 	if err != nil {
-		return empty, fmt.Errorf("failed to create GenAI client: %w", err)
+		return nil, fmt.Errorf("failed to create GenAI client: %w", err)
 	}
 
-	prompt := fmt.Sprintf(`You are parsing OCR text from a receipt.
-Return ONLY valid JSON with this schema:
-{
-  "items": [
-    {"name": "string", "quantity": 1, "total_price": 1.23, "price_per_item": 1.23}
-  ],
-  "currency": "string",
-  "receipt_date": "string (ISO 8601 date: YYYY-MM-DD preferred)",
-  "title": "string",
-  "tax": 1.23,
-  "tip": 2.50
+	return &GeminiClient{client: client, model: model}, nil
 }
-Rules:
-- Include only line items in items (exclude tax, totals, payment, change, headers, footers).
+
+// Model is the Gemini model this client sends requests to.
+func (c *GeminiClient) Model() string { return c.model }
+
+const receiptRules = `Rules:
+- Include only line items in items (exclude tax, totals, subtotals, payment, change, headers, footers).
 - If quantity is missing, use 1.
-- If total_price or price_per_item is missing, set it to null.
-- Try to convert the name into a human-readable format (e.g., "Coca-Cola" instead of "COLA").
-- Title should be the restaurant name or where the receipt is from.
-- If currency is not explicit, try to infer it from the context (e.g., "USD" for US-based receipts). If no currency is found, leave it null.
-- tax: Parse the sales tax amount if present (e.g., "Tax: $1.50"). Null if not found.
-- tip: Parse the tip/gratuity amount if present (e.g., "Tip: $5.00"). Null if not found.
+- If total_price or price_per_item is missing, set it to null. Never invent a price.
+- Convert the name into a human-readable format (e.g., "Coca-Cola" instead of "COLA").
+- title is the restaurant or store the receipt is from.
+- If currency is not explicit, infer it from context (e.g., "USD" for US receipts). Null if unknown.
+- receipt_date: ISO 8601 (YYYY-MM-DD) preferred. Null if not present.
+- tax: the sales tax amount if present. Null if not found.
+- tip: the tip/gratuity amount if present. Null if not found.`
+
+const receiptImagePrompt = `You are reading a photo of a receipt and extracting its line items.
+Use the column layout of the receipt: prices are usually right-aligned on the same row as the item they belong to, and a leading number is usually a quantity.
+` + receiptRules
+
+const receiptTextPromptHeader = `You are parsing OCR text from a receipt.
+` + receiptRules + `
 
 Receipt OCR text:
 ---
-%s
----`, ocrText)
+`
 
-	config := &genai.GenerateContentConfig{
-		Temperature:     genai.Ptr(float32(0.1)),
-		TopP:            genai.Ptr(float32(0.95)),
-		TopK:            genai.Ptr(float32(40)),
-		MaxOutputTokens: 4096,
-		ThinkingConfig: &genai.ThinkingConfig{
-			ThinkingBudget: genai.Ptr(int32(0)),
-		},
+// ParseReceiptImage extracts receipt data straight from the image bytes. This
+// is the primary path: it is cheaper than Vision OCR plus a text parse, and it
+// keeps the receipt's spatial layout, which OCR flattening destroys.
+func (c *GeminiClient) ParseReceiptImage(ctx context.Context, imageData []byte, mimeType string) (GeminiReceiptParseResult, error) {
+	var empty GeminiReceiptParseResult
+	if len(imageData) == 0 {
+		return empty, fmt.Errorf("image data is empty")
 	}
-	resp, err := client.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(prompt), config)
+
+	mimeType = strings.TrimSpace(mimeType)
+	if mimeType == "" || !strings.HasPrefix(mimeType, "image/") {
+		mimeType = http.DetectContentType(imageData)
+	}
+	if mimeType == "image/jpg" {
+		mimeType = "image/jpeg"
+	}
+
+	parts := []*genai.Part{
+		genai.NewPartFromText(receiptImagePrompt),
+		genai.NewPartFromBytes(imageData, mimeType),
+	}
+	return c.generate(ctx, parts)
+}
+
+// ParseReceiptText parses already-extracted OCR text. Retained for the
+// RECEIPT_PARSE_MODE=ocr rollback path and as the automatic fallback when the
+// image path yields nothing.
+func (c *GeminiClient) ParseReceiptText(ctx context.Context, ocrText string) (GeminiReceiptParseResult, error) {
+	var empty GeminiReceiptParseResult
+	if strings.TrimSpace(ocrText) == "" {
+		return empty, fmt.Errorf("ocr text is empty")
+	}
+
+	parts := []*genai.Part{genai.NewPartFromText(receiptTextPromptHeader + ocrText + "\n---")}
+	return c.generate(ctx, parts)
+}
+
+func (c *GeminiClient) generate(ctx context.Context, parts []*genai.Part) (GeminiReceiptParseResult, error) {
+	var empty GeminiReceiptParseResult
+
+	contents := []*genai.Content{{Role: genai.RoleUser, Parts: parts}}
+	resp, err := c.client.Models.GenerateContent(ctx, c.model, contents, c.config())
 	if err != nil {
 		return empty, fmt.Errorf("failed to generate content: %w", err)
 	}
@@ -127,15 +178,90 @@ Receipt OCR text:
 		return empty, fmt.Errorf("empty response from Gemini")
 	}
 
-	cleaned := cleanGeminiJSON(responseText)
 	var parsed geminiReceiptData
-	if err := json.Unmarshal([]byte(cleaned), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(cleanGeminiJSON(responseText)), &parsed); err != nil {
 		return empty, fmt.Errorf("failed to parse Gemini JSON: %w", err)
 	}
 
-	items := make([]ReceiptItemParsed, 0, len(parsed.Items))
-	for _, item := range parsed.Items {
-		if strings.TrimSpace(item.Name) == "" {
+	receiptDate := parseReceiptDate(parsed.ReceiptDate)
+	if receiptDate == nil {
+		receiptDate = parseReceiptDate(parsed.Date)
+	}
+
+	return GeminiReceiptParseResult{
+		Items:       normalizeParsedItems(parsed.Items),
+		Currency:    normalizeOptionalString(parsed.Currency),
+		ReceiptDate: receiptDate,
+		Title:       normalizeOptionalString(parsed.Title),
+		Tax:         parsed.Tax,
+		Tip:         parsed.Tip,
+	}, nil
+}
+
+// config asks for schema-constrained JSON so the response needs no coaxing,
+// and keeps reasoning off — receipt extraction does not benefit from it and it
+// is billed as output tokens. Gemini 3 uses thinkingLevel and mediaResolution;
+// 2.5 uses thinkingBudget and rejects mediaResolution.
+func (c *GeminiClient) config() *genai.GenerateContentConfig {
+	config := &genai.GenerateContentConfig{
+		Temperature:      genai.Ptr(float32(0.1)),
+		TopP:             genai.Ptr(float32(0.95)),
+		MaxOutputTokens:  4096,
+		ResponseMIMEType: "application/json",
+		ResponseSchema:   receiptResponseSchema(),
+	}
+
+	if strings.HasPrefix(c.model, "gemini-3") {
+		config.ThinkingConfig = &genai.ThinkingConfig{ThinkingLevel: genai.ThinkingLevelMinimal}
+		// Receipts are dense small text; don't let the model downsample them.
+		config.MediaResolution = genai.MediaResolutionHigh
+	} else {
+		config.ThinkingConfig = &genai.ThinkingConfig{ThinkingBudget: genai.Ptr(int32(0))}
+		config.TopK = genai.Ptr(float32(40))
+	}
+
+	return config
+}
+
+func receiptResponseSchema() *genai.Schema {
+	nullableNumber := &genai.Schema{Type: genai.TypeNumber, Nullable: genai.Ptr(true)}
+	nullableString := &genai.Schema{Type: genai.TypeString, Nullable: genai.Ptr(true)}
+
+	return &genai.Schema{
+		Type: genai.TypeObject,
+		Properties: map[string]*genai.Schema{
+			"items": {
+				Type: genai.TypeArray,
+				Items: &genai.Schema{
+					Type: genai.TypeObject,
+					Properties: map[string]*genai.Schema{
+						"name":           {Type: genai.TypeString},
+						"quantity":       {Type: genai.TypeInteger},
+						"total_price":    nullableNumber,
+						"price_per_item": nullableNumber,
+					},
+					PropertyOrdering: []string{"name", "quantity", "total_price", "price_per_item"},
+					Required:         []string{"name", "quantity"},
+				},
+			},
+			"currency":     nullableString,
+			"receipt_date": nullableString,
+			"title":        nullableString,
+			"tax":          nullableNumber,
+			"tip":          nullableNumber,
+		},
+		PropertyOrdering: []string{"items", "currency", "receipt_date", "title", "tax", "tip"},
+		Required:         []string{"items"},
+	}
+}
+
+// normalizeParsedItems drops unusable rows and derives whichever of
+// total/per-item price the model left null.
+func normalizeParsedItems(raw []geminiReceiptItem) []ReceiptItemParsed {
+	items := make([]ReceiptItemParsed, 0, len(raw))
+	for _, item := range raw {
+		name := strings.TrimSpace(item.Name)
+		if name == "" {
 			continue
 		}
 
@@ -148,15 +274,15 @@ Receipt OCR text:
 			continue
 		}
 
-		var totalPrice float64
-		var pricePerItem float64
-		if item.TotalPrice == nil && item.PricePerItem != nil {
+		var totalPrice, pricePerItem float64
+		switch {
+		case item.TotalPrice == nil:
 			pricePerItem = *item.PricePerItem
 			totalPrice = pricePerItem * float64(qty)
-		} else if item.PricePerItem == nil && item.TotalPrice != nil {
+		case item.PricePerItem == nil:
 			totalPrice = *item.TotalPrice
 			pricePerItem = totalPrice / float64(qty)
-		} else if item.TotalPrice != nil && item.PricePerItem != nil {
+		default:
 			totalPrice = *item.TotalPrice
 			pricePerItem = *item.PricePerItem
 		}
@@ -166,26 +292,13 @@ Receipt OCR text:
 		}
 
 		items = append(items, ReceiptItemParsed{
-			Name:         strings.TrimSpace(item.Name),
+			Name:         name,
 			Quantity:     qty,
 			TotalPrice:   totalPrice,
 			PricePerItem: pricePerItem,
 		})
 	}
-
-	receiptDate := parseReceiptDate(parsed.ReceiptDate)
-	if receiptDate == nil {
-		receiptDate = parseReceiptDate(parsed.Date)
-	}
-
-	return GeminiReceiptParseResult{
-		Items:       items,
-		Currency:    normalizeOptionalString(parsed.Currency),
-		ReceiptDate: receiptDate,
-		Title:       normalizeOptionalString(parsed.Title),
-		Tax:         parsed.Tax,
-		Tip:         parsed.Tip,
-	}, nil
+	return items
 }
 
 func extractGeminiText(resp *genai.GenerateContentResponse) string {
@@ -207,7 +320,7 @@ func normalizeOptionalString(value *string) *string {
 	return &trimmed
 }
 
-// parseReceiptDate parses a date string from OCR into *time.Time.
+// parseReceiptDate parses a date string from a receipt into *time.Time.
 // Tries common receipt date formats; returns nil if parsing fails.
 func parseReceiptDate(value *string) *time.Time {
 	if value == nil {
@@ -218,10 +331,10 @@ func parseReceiptDate(value *string) *time.Time {
 		return nil
 	}
 	layouts := []string{
-		"2006-01-02",           // ISO 8601
-		"2006-01-02T15:04:05",  // ISO 8601 with time
-		"01/02/2006",           // US
-		"02/01/2006",           // EU
+		"2006-01-02",          // ISO 8601
+		"2006-01-02T15:04:05", // ISO 8601 with time
+		"01/02/2006",          // US
+		"02/01/2006",          // EU
 		"2006/01/02",
 		"Jan 2, 2006",
 		"January 2, 2006",
@@ -237,6 +350,8 @@ func parseReceiptDate(value *string) *time.Time {
 	return nil
 }
 
+// cleanGeminiJSON is belt-and-braces now that the request carries a response
+// schema: it strips code fences if a model ever ignores the JSON mime type.
 func cleanGeminiJSON(input string) string {
 	cleaned := strings.TrimSpace(input)
 	cleaned = strings.TrimPrefix(cleaned, "```json")
