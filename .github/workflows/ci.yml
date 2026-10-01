@@ -23,7 +23,10 @@ jobs:
       - name: Test
         run: go test -mod=vendor ./...
 
+      # govulncheck@latest requires a newer toolchain than the one the build
+      # steps use, and the action installs it with GOTOOLCHAIN=local, so this
+      # step needs its own Go version. Bump it when the install starts failing.
       - name: Vulnerability scan
         uses: golang/govulncheck-action@v1
         with:
-          go-version-input: "1.25"
+          go-version-input: "1.26"

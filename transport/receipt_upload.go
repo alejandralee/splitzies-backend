@@ -40,7 +40,7 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	ocr := t.parseOCRForReceipt(ctx, rid, fileData)
+	ocr := t.parseReceipt(ctx, rid, fileData, contentType)
 	if ocr == nil || len(ocr.items) == 0 {
 		t.log.Error("no receipt items extracted, not persisting receipt", "request_id", rid, "image_url", imageURL)
 		writeJSONError(w, http.StatusUnprocessableEntity, "receipt_parse_failed", "failed to extract any items from receipt image", rid)
@@ -62,7 +62,7 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 	}
 }
 
-// ocrParseResult holds the result of parsing OCR text from a receipt image.
+// ocrParseResult holds the result of parsing a receipt image into items.
 type ocrParseResult struct {
 	items       []persistence.ReceiptItemDB
 	ocrTextData *persistence.OCRTextData
@@ -73,17 +73,55 @@ type ocrParseResult struct {
 	tip         *float64
 }
 
-// visionTimeout and geminiTimeout bound the two external calls in the OCR
-// pipeline so a slow/hung upstream can't tie up a request indefinitely.
+// Timeouts bound every external call in the parse pipeline so a slow or hung
+// upstream can't tie up a request indefinitely.
 const (
-	gcsUploadTimeout = 15 * time.Second
-	visionTimeout    = 15 * time.Second
-	geminiTimeout    = 20 * time.Second
+	gcsUploadTimeout   = 15 * time.Second
+	visionTimeout      = 15 * time.Second
+	geminiTextTimeout  = 20 * time.Second
+	geminiImageTimeout = 30 * time.Second
 )
 
-// parseOCRForReceipt performs OCR on the image bytes then parses the result with Gemini.
-// Returns nil if OCR produces no text; falls back to regex parsing if Gemini fails.
-func (t *Transport) parseOCRForReceipt(ctx context.Context, rid string, fileData []byte) *ocrParseResult {
+// parseReceipt turns image bytes into receipt items.
+//
+// Default path: one multimodal Gemini call on the image — cheaper than Vision
+// OCR plus a text parse, one round trip instead of two, and the receipt's
+// column layout survives. If it errors or yields no items we fall back to the
+// legacy Vision-OCR path automatically, so a bad image-path result degrades
+// instead of failing the upload. Setting RECEIPT_PARSE_MODE=ocr skips the image
+// path entirely and restores the old behaviour.
+//
+// Returns nil when no path produced anything usable.
+func (t *Transport) parseReceipt(ctx context.Context, rid string, fileData []byte, contentType string) *ocrParseResult {
+	if t.receiptParseMode == ReceiptParseModeOCR {
+		t.log.Info("parsing receipt via legacy OCR path", "request_id", rid, "mode", t.receiptParseMode, "model", t.geminiClient.Model())
+		return t.parseReceiptViaOCR(ctx, rid, fileData)
+	}
+
+	geminiCtx, cancel := context.WithTimeout(ctx, geminiImageTimeout)
+	defer cancel()
+
+	parsed, err := t.geminiClient.ParseReceiptImage(geminiCtx, fileData, contentType)
+	switch {
+	case err != nil:
+		t.log.Error("Gemini image parse failed, falling back to Vision OCR",
+			"request_id", rid, "model", t.geminiClient.Model(), "error", err)
+	case len(parsed.Items) == 0:
+		t.log.Error("Gemini image parse extracted no items, falling back to Vision OCR",
+			"request_id", rid, "model", t.geminiClient.Model())
+	default:
+		t.log.Info("parsed receipt from image", "request_id", rid,
+			"model", t.geminiClient.Model(), "item_count", len(parsed.Items))
+		return buildParseResult(parsed, nil)
+	}
+
+	return t.parseReceiptViaOCR(ctx, rid, fileData)
+}
+
+// parseReceiptViaOCR is the original pipeline: Cloud Vision
+// DOCUMENT_TEXT_DETECTION, then Gemini over the flattened text, with the regex
+// parser as a last resort.
+func (t *Transport) parseReceiptViaOCR(ctx context.Context, rid string, fileData []byte) *ocrParseResult {
 	visionCtx, cancel := context.WithTimeout(ctx, visionTimeout)
 	defer cancel()
 
@@ -97,27 +135,30 @@ func (t *Transport) parseOCRForReceipt(ctx context.Context, rid string, fileData
 		return nil
 	}
 
-	result := &ocrParseResult{
-		ocrTextData: &persistence.OCRTextData{Text: ocrText},
-	}
+	geminiCtx, cancelGemini := context.WithTimeout(ctx, geminiTextTimeout)
+	defer cancelGemini()
 
-	geminiCtx, cancel := context.WithTimeout(ctx, geminiTimeout)
-	defer cancel()
-
-	parsed, parseErr := storage.ParseReceiptItemsWithGemini(geminiCtx, ocrText)
+	parsed, parseErr := t.geminiClient.ParseReceiptText(geminiCtx, ocrText)
 	if parseErr != nil {
-		t.log.Error("Gemini receipt parse failed, falling back to regex", "request_id", rid, "error", parseErr)
+		t.log.Error("Gemini text parse failed, falling back to regex", "request_id", rid, "error", parseErr)
 		parsed.Items = storage.ExtractReceiptItemsFromText(ocrText)
 		if len(parsed.Items) == 0 {
 			t.log.Error("regex fallback also extracted no items from OCR text", "request_id", rid)
 		}
 	}
 
-	result.currency = parsed.Currency
-	result.receiptDate = parsed.ReceiptDate
-	result.title = parsed.Title
-	result.tax = parsed.Tax
-	result.tip = parsed.Tip
+	return buildParseResult(parsed, &persistence.OCRTextData{Text: ocrText})
+}
+
+func buildParseResult(parsed storage.GeminiReceiptParseResult, ocrTextData *persistence.OCRTextData) *ocrParseResult {
+	result := &ocrParseResult{
+		ocrTextData: ocrTextData,
+		currency:    parsed.Currency,
+		receiptDate: parsed.ReceiptDate,
+		title:       parsed.Title,
+		tax:         parsed.Tax,
+		tip:         parsed.Tip,
+	}
 
 	if len(parsed.Items) > 0 {
 		result.items = make([]persistence.ReceiptItemDB, len(parsed.Items))
