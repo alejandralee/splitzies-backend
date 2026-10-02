@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"splitzies/money"
@@ -160,9 +161,10 @@ func buildParseResult(parsed storage.GeminiReceiptParseResult, ocrTextData *pers
 		tip:         parsed.Tip,
 	}
 
-	if len(parsed.Items) > 0 {
-		result.items = make([]persistence.ReceiptItemDB, len(parsed.Items))
-		for i, item := range parsed.Items {
+	items := mergeDuplicateItems(parsed.Items, parsed.Currency)
+	if len(items) > 0 {
+		result.items = make([]persistence.ReceiptItemDB, len(items))
+		for i, item := range items {
 			result.items[i] = persistence.ReceiptItemDB{
 				Name:         item.Name,
 				Quantity:     item.Quantity,
@@ -173,6 +175,34 @@ func buildParseResult(parsed storage.GeminiReceiptParseResult, ocrTextData *pers
 	}
 
 	return result
+}
+
+// mergeDuplicateItems folds receipt lines with the same name and unit price
+// into one item, so "Beer $6" printed on three lines becomes a single group of
+// three units that can be split across people instead of three separate
+// groups. Names match case- and whitespace-insensitively; prices match after
+// rounding to the currency's precision. The first line's name and position win.
+func mergeDuplicateItems(items []storage.ReceiptItemParsed, currency *string) []storage.ReceiptItemParsed {
+	type key struct {
+		name  string
+		price float64
+	}
+	merged := make([]storage.ReceiptItemParsed, 0, len(items))
+	index := make(map[key]int, len(items))
+	for _, item := range items {
+		k := key{
+			name:  strings.ToLower(strings.Join(strings.Fields(item.Name), " ")),
+			price: money.Round(item.PricePerItem, currency),
+		}
+		if i, ok := index[k]; ok {
+			merged[i].Quantity += item.Quantity
+			merged[i].TotalPrice += item.TotalPrice
+			continue
+		}
+		index[k] = len(merged)
+		merged = append(merged, item)
+	}
+	return merged
 }
 
 func (t *Transport) validateReceiptImageRequest(w http.ResponseWriter, r *http.Request) (io.ReadCloser, string, error) {
