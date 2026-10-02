@@ -1,0 +1,12 @@
+# Compiled binary (go build output)
+/splitzies
+
+# macOS
+.DS_Store
+
+# Next.js build output from running the frontend in the wrong directory
+.next/
+
+# Local environment
+.env
+.env.*
