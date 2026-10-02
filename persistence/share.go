@@ -294,3 +294,145 @@ func nullableTime(t time.Time) *time.Time {
 	}
 	return &t
 }
+
+// CountReceiptsForDevice returns how many bills are currently in a device's
+// history. It backs the per-device cap, so it counts live membership rather
+// than receipts ever created: deleting a bill frees a slot.
+func (c *Client) CountReceiptsForDevice(ctx context.Context, deviceID string) (int, error) {
+	var count int
+	err := c.db.QueryRow(ctx,
+		"SELECT COUNT(*) FROM receipt_devices WHERE device_id = $1",
+		deviceID,
+	).Scan(&count)
+	if err != nil {
+		return 0, fmt.Errorf("failed to count receipts for device: %w", err)
+	}
+	return count, nil
+}
+
+// DeleteReceiptForDevice drops a device's membership of a receipt and, when
+// that was the last device holding it, deletes the receipt itself. Every child
+// table cascades from receipts, so the items, participants, assignments, share
+// link and stored receipt text all go with it.
+//
+// A bill still held by someone else is never destroyed — it is not any one
+// participant's to delete — so for a shared bill this only removes the
+// caller's copy.
+func (c *Client) DeleteReceiptForDevice(ctx context.Context, receiptID, deviceID string) error {
+	tx, err := c.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	deleted, err := deleteReceiptForDeviceTx(ctx, tx, receiptID, deviceID)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return fmt.Errorf("receipt %q not found in history", receiptID)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit receipt deletion: %w", err)
+	}
+	return nil
+}
+
+// DeleteAllReceiptsForDevice empties a device's history, hard-deleting every
+// bill nobody else is holding. It returns how many bills left the history.
+//
+// The device identity itself survives, so the app keeps working afterwards
+// without minting a new one — there is nothing left attached to it.
+func (c *Client) DeleteAllReceiptsForDevice(ctx context.Context, deviceID string) (int, error) {
+	tx, err := c.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	rows, err := tx.Query(ctx,
+		"SELECT receipt_id FROM receipt_devices WHERE device_id = $1",
+		deviceID,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("failed to list receipts for device: %w", err)
+	}
+
+	var receiptIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("failed to scan receipt id: %w", err)
+		}
+		receiptIDs = append(receiptIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("failed to read receipts for device: %w", err)
+	}
+
+	removed := 0
+	for _, receiptID := range receiptIDs {
+		deleted, err := deleteReceiptForDeviceTx(ctx, tx, receiptID, deviceID)
+		if err != nil {
+			return 0, err
+		}
+		if deleted {
+			removed++
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("failed to commit history deletion: %w", err)
+	}
+	return removed, nil
+}
+
+// deleteReceiptForDeviceTx unlinks one device from one receipt inside an open
+// transaction, deleting the receipt when no device is left on it. It reports
+// whether the device was on the receipt at all.
+//
+// The receipt row is locked first so two participants deleting the same bill
+// at the same time can't each conclude the other still holds it and leave an
+// orphaned receipt behind.
+func deleteReceiptForDeviceTx(ctx context.Context, tx pgx.Tx, receiptID, deviceID string) (bool, error) {
+	var locked string
+	err := tx.QueryRow(ctx, "SELECT id FROM receipts WHERE id = $1 FOR UPDATE", receiptID).Scan(&locked)
+	if errors.Is(err, pgx.ErrNoRows) {
+		// The receipt is already gone; clean up any dangling membership row.
+		if _, err := tx.Exec(ctx,
+			"DELETE FROM receipt_devices WHERE receipt_id = $1 AND device_id = $2",
+			receiptID, deviceID,
+		); err != nil {
+			return false, fmt.Errorf("failed to remove stale history entry: %w", err)
+		}
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("failed to lock receipt: %w", err)
+	}
+
+	result, err := tx.Exec(ctx,
+		"DELETE FROM receipt_devices WHERE receipt_id = $1 AND device_id = $2",
+		receiptID, deviceID,
+	)
+	if err != nil {
+		return false, fmt.Errorf("failed to remove device from receipt: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return false, nil
+	}
+
+	// Last one out deletes the bill. Everything else cascades from receipts.
+	if _, err := tx.Exec(ctx, `
+		DELETE FROM receipts
+		WHERE id = $1
+		  AND NOT EXISTS (SELECT 1 FROM receipt_devices WHERE receipt_id = $1)
+	`, receiptID); err != nil {
+		return false, fmt.Errorf("failed to delete orphaned receipt: %w", err)
+	}
+
+	return true, nil
+}

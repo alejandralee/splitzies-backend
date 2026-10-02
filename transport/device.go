@@ -71,6 +71,66 @@ func (t *Transport) requireDevice(w http.ResponseWriter, r *http.Request) (strin
 	return *deviceID, true
 }
 
+// requireReceiptMember resolves the calling device and checks it is on the
+// receipt, writing the response and returning false when it isn't.
+//
+// Knowing a receipt ID is not authority to change the bill. IDs travel through
+// chat threads, screenshots and browser history, and "stop sharing" has to
+// actually revoke something — with no check here, anyone who ever saw a link
+// could still retotal the bill or delete participants long after it was
+// revoked. Membership comes from uploading the receipt or from opening a live
+// share link, and every mutation goes through this.
+func (t *Transport) requireReceiptMember(w http.ResponseWriter, r *http.Request, receiptID string) (string, bool) {
+	deviceID, ok := t.requireDevice(w, r)
+	if !ok {
+		return "", false
+	}
+
+	member, err := t.persistenceClient.DeviceOnReceipt(r.Context(), receiptID, deviceID)
+	if err != nil {
+		t.log.Error("failed to check receipt membership",
+			"request_id", requestID(r), "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to check access to this bill", requestID(r))
+		return "", false
+	}
+	if !member {
+		writeJSONError(w, http.StatusForbidden, "not_a_participant",
+			"you don't have access to this bill — open its share link to join", requestID(r))
+		return "", false
+	}
+
+	return deviceID, true
+}
+
+// requireReceiptParticipant is requireReceiptMember plus a check that the
+// participant in the URL actually belongs to the receipt in the URL.
+//
+// The assignment endpoints take a receipt, a participant and an item, and the
+// store only checked that the participant and item agreed with each other —
+// not that either belonged to the receipt being addressed. Without this, being
+// a member of any one bill was enough to operate on a participant from
+// another.
+func (t *Transport) requireReceiptParticipant(w http.ResponseWriter, r *http.Request, receiptID, userID string) bool {
+	if _, ok := t.requireReceiptMember(w, r, receiptID); !ok {
+		return false
+	}
+
+	exists, err := t.persistenceClient.ReceiptUserExists(r.Context(), receiptID, userID)
+	if err != nil {
+		t.log.Error("failed to verify receipt participant",
+			"request_id", requestID(r), "receipt_id", receiptID, "user_id", userID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to verify participant", requestID(r))
+		return false
+	}
+	if !exists {
+		writeJSONError(w, http.StatusNotFound, "user_not_found",
+			"participant "+userID+" is not on this bill", requestID(r))
+		return false
+	}
+
+	return true
+}
+
 // CreateDeviceHandler handles POST /devices. It mints an anonymous identity so
 // a user gets bill history without creating an account. The returned token is
 // shown once and must be stored by the client.
@@ -145,7 +205,6 @@ func (t *Transport) ListMyReceiptsHandler(w http.ResponseWriter, r *http.Request
 		summary := ReceiptSummary{
 			ReceiptID:        s.ReceiptID,
 			Title:            s.Title,
-			ImageURL:         s.ImageURL,
 			ReceiptDate:      s.ReceiptDate,
 			CreatedAt:        s.CreatedAt,
 			UpdatedAt:        s.UpdatedAt,
@@ -202,9 +261,10 @@ func (t *Transport) deviceTotalOnReceipt(ctx context.Context, receiptID, deviceI
 	return &amount, nil
 }
 
-// DeleteMyReceiptHandler handles DELETE /me/receipts/{receipt_id}. It hides the
-// bill from this device's history only — other participants keep it, since a
-// shared bill isn't any one person's to delete.
+// DeleteMyReceiptHandler handles DELETE /me/receipts/{receipt_id}. It drops the
+// bill from this device's history and, when no other device is holding it,
+// deletes the bill and everything on it outright. A bill someone else still
+// has stays theirs — a shared bill isn't any one person's to destroy.
 func (t *Transport) DeleteMyReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	rid := requestID(r)
 	receiptID := r.PathValue("receipt_id")
@@ -214,19 +274,53 @@ func (t *Transport) DeleteMyReceiptHandler(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := t.persistenceClient.RemoveDeviceFromReceipt(r.Context(), receiptID, deviceID); err != nil {
+	if err := t.persistenceClient.DeleteReceiptForDevice(r.Context(), receiptID, deviceID); err != nil {
 		if isNotFound(err) {
 			writeJSONError(w, http.StatusNotFound, "receipt_not_found",
 				"receipt "+receiptID+" is not in this device's history", rid)
 			return
 		}
-		t.log.Error("failed to remove receipt from history", "request_id", rid, "receipt_id", receiptID, "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to remove receipt from history", rid)
+		t.log.Error("failed to delete receipt from history", "request_id", rid, "receipt_id", receiptID, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to delete receipt", rid)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]string{"message": "receipt removed from history"}); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]string{"message": "receipt deleted"}); err != nil {
 		t.log.Error("failed to encode delete history response", "request_id", rid, "error", err)
+	}
+}
+
+// DeleteAllMyReceiptsHandler handles DELETE /me/receipts — the "delete
+// everything" the app offers in place of an account settings page. Every bill
+// in this device's history goes, and each one nobody else is holding is
+// deleted along with its items, participants, assignments, share link and
+// stored receipt text.
+//
+// The device identity itself is kept so the app keeps working without minting
+// a new one; there is nothing left attached to it.
+func (t *Transport) DeleteAllMyReceiptsHandler(w http.ResponseWriter, r *http.Request) {
+	rid := requestID(r)
+
+	deviceID, ok := t.requireDevice(w, r)
+	if !ok {
+		return
+	}
+
+	removed, err := t.persistenceClient.DeleteAllReceiptsForDevice(r.Context(), deviceID)
+	if err != nil {
+		t.log.Error("failed to delete device history", "request_id", rid, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to delete history", rid)
+		return
+	}
+
+	t.log.Info("deleted device history", "request_id", rid, "receipts_removed", removed)
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(DeleteAllReceiptsResponse{
+		Message:         "history deleted",
+		ReceiptsDeleted: removed,
+	}); err != nil {
+		t.log.Error("failed to encode delete-all response", "request_id", rid, "error", err)
 	}
 }

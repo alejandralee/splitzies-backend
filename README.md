@@ -134,7 +134,7 @@ Configuration:
 | `RECEIPT_PARSE_MODE` | `image` | Set to `ocr` to skip the image path entirely and use only the Cloud Vision OCR pipeline. |
 | `VERTEX_AI_LOCATION` | `global` | Vertex AI region. |
 | `GCP_PROJECT_ID` | — | Required (falls back to `GOOGLE_CLOUD_PROJECT`). |
-| `GOOGLE_APPLICATION_CREDENTIALS_JSON` | — | Required service account JSON, used for Vertex AI, Vision and GCS. |
+| `GOOGLE_APPLICATION_CREDENTIALS_JSON` | — | Required service account JSON, used for Vertex AI and Vision. |
 
 ### Rolling back
 

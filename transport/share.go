@@ -35,7 +35,12 @@ func (t *Transport) CreateShareLinkHandler(w http.ResponseWriter, r *http.Reques
 	receiptID := r.PathValue("receipt_id")
 	ctx := r.Context()
 
-	link, err := t.persistenceClient.CreateOrGetShareLink(ctx, receiptID, deviceIDFromContext(ctx))
+	memberID, ok := t.requireReceiptMember(w, r, receiptID)
+	if !ok {
+		return
+	}
+
+	link, err := t.persistenceClient.CreateOrGetShareLink(ctx, receiptID, &memberID)
 	if err != nil {
 		if isNotFound(err) {
 			writeJSONError(w, http.StatusNotFound, "receipt_not_found", fmt.Sprintf("receipt %q not found", receiptID), rid)
@@ -70,6 +75,10 @@ func (t *Transport) CreateShareLinkHandler(w http.ResponseWriter, r *http.Reques
 func (t *Transport) RevokeShareLinkHandler(w http.ResponseWriter, r *http.Request) {
 	rid := requestID(r)
 	receiptID := r.PathValue("receipt_id")
+
+	if _, ok := t.requireReceiptMember(w, r, receiptID); !ok {
+		return
+	}
 
 	if err := t.persistenceClient.RevokeShareLink(r.Context(), receiptID); err != nil {
 		if errors.Is(err, persistence.ErrShareLinkNotFound) {
@@ -143,7 +152,7 @@ func (t *Transport) ClaimUserHandler(w http.ResponseWriter, r *http.Request) {
 	userID := r.PathValue("user_id")
 	ctx := r.Context()
 
-	deviceID, ok := t.requireDevice(w, r)
+	deviceID, ok := t.requireReceiptMember(w, r, receiptID)
 	if !ok {
 		return
 	}

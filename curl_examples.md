@@ -44,6 +44,7 @@ curl -X POST http://localhost:8080/receipts/document-ai \
 
 ```bash
 curl -X POST https://your-app.herokuapp.com/receipts/image \
+  -H "X-Device-Token: $DEVICE_TOKEN" \
   -F "image=@receipt.jpg"
 ```
 
@@ -51,9 +52,10 @@ curl -X POST https://your-app.herokuapp.com/receipts/image \
 
 ```json
 {
-  "message": "Receipt image uploaded successfully with ID: 01ARZ3NDEKTSV4RRFFQ69G5FAV",
   "receipt_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
-  "image_url": "https://storage.googleapis.com/splitzies/receipts/01ARZ3NDEKTSV4RRFFQ69G5FAV/20240113_143022.jpg"
+  "items": [
+    { "id": "01ARZ3NDEKTSV4RRFFQ69G5FAW", "name": "Margarita", "amount": { "amount": 12.0, "currency": "USD" } }
+  ]
 }
 ```
 

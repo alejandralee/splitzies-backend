@@ -14,6 +14,11 @@ import (
 func (t *Transport) AddUserToReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	receiptID := r.PathValue("receipt_id")
 
+	memberID, ok := t.requireReceiptMember(w, r, receiptID)
+	if !ok {
+		return
+	}
+
 	var req AddUserToReceiptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_body", "failed to parse request body", "")
@@ -28,12 +33,7 @@ func (t *Transport) AddUserToReceiptHandler(w http.ResponseWriter, r *http.Reque
 	// an organiser typing in everyone's names doesn't claim the first one.
 	var deviceID *string
 	if req.Claim {
-		deviceID = deviceIDFromContext(r.Context())
-		if deviceID == nil {
-			writeJSONError(w, http.StatusUnauthorized, "device_required",
-				"claim requires a valid "+DeviceTokenHeader+" header; create one with POST /devices", "")
-			return
-		}
+		deviceID = &memberID
 	}
 
 	user, err := t.persistenceClient.AddUserToReceipt(r.Context(), receiptID, req.Name, deviceID)
@@ -77,6 +77,10 @@ func (t *Transport) RemoveUserFromReceiptHandler(w http.ResponseWriter, r *http.
 	receiptID := r.PathValue("receipt_id")
 	userID := r.PathValue("user_id")
 
+	if _, ok := t.requireReceiptMember(w, r, receiptID); !ok {
+		return
+	}
+
 	if err := t.persistenceClient.RemoveUserFromReceipt(r.Context(), receiptID, userID); err != nil {
 		if isNotFound(err) {
 			writeJSONError(w, http.StatusNotFound, "user_not_found", err.Error(), "")
@@ -96,6 +100,10 @@ func (t *Transport) RemoveUserFromReceiptHandler(w http.ResponseWriter, r *http.
 // PatchReceiptHandler handles PATCH /receipts/{receipt_id}
 func (t *Transport) PatchReceiptHandler(w http.ResponseWriter, r *http.Request) {
 	receiptID := r.PathValue("receipt_id")
+
+	if _, ok := t.requireReceiptMember(w, r, receiptID); !ok {
+		return
+	}
 
 	var req PatchReceiptRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -274,7 +282,12 @@ func (t *Transport) GetReceiptHandler(w http.ResponseWriter, r *http.Request) {
 
 // AssignItemsToUserHandler handles POST /receipts/{receipt_id}/users/{user_id}/items
 func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Request) {
+	receiptID := r.PathValue("receipt_id")
 	userID := r.PathValue("user_id")
+
+	if !t.requireReceiptParticipant(w, r, receiptID, userID) {
+		return
+	}
 
 	var req AssignItemsToUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -316,8 +329,13 @@ func (t *Transport) AssignItemsToUserHandler(w http.ResponseWriter, r *http.Requ
 
 // UnassignItemFromUserHandler handles DELETE /receipts/{receipt_id}/users/{user_id}/items/{item_id}
 func (t *Transport) UnassignItemFromUserHandler(w http.ResponseWriter, r *http.Request) {
+	receiptID := r.PathValue("receipt_id")
 	userID := r.PathValue("user_id")
 	itemID := r.PathValue("item_id")
+
+	if !t.requireReceiptParticipant(w, r, receiptID, userID) {
+		return
+	}
 
 	if err := t.persistenceClient.UnassignUserFromItem(r.Context(), userID, itemID); err != nil {
 		t.log.Error("failed to unassign item from user", "user_id", userID, "item_id", itemID, "error", err)
