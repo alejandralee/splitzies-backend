@@ -3,6 +3,7 @@ package transport
 import (
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,7 +60,37 @@ func (l *ipRateLimiter) allow(ip string) bool {
 	return limiter.Allow()
 }
 
+// clientIP returns the key to rate limit a request under.
+//
+// Behind Heroku's router, r.RemoteAddr is the router's own address, not the
+// caller's — and Heroku runs many routers, so keying on it scatters one
+// caller's requests across many buckets and no bucket ever fills. That is not
+// a tuning problem: it silently disables rate limiting altogether.
+//
+// Heroku *appends* the address it accepted the connection from to the end of
+// X-Forwarded-For, so the last element is the only one the caller cannot
+// forge: a caller who sends "X-Forwarded-For: 1.2.3.4" gets
+// "1.2.3.4, <their real IP>" by the time it reaches us. Earlier elements are
+// attacker-controlled and must never be used as the key.
+// clientIP returns the key to rate limit a request under.
+//
+// Behind Heroku's router, r.RemoteAddr is the router's own address, not the
+// caller's — and Heroku runs many routers, so keying on it scatters one
+// caller's requests across many buckets and no bucket ever fills. That is not
+// a tuning problem: it silently disables rate limiting altogether.
+//
+// Heroku *appends* the address it accepted the connection from to the end of
+// X-Forwarded-For, so the last element is the only one the caller cannot
+// forge: a caller who sends "X-Forwarded-For: 1.2.3.4" gets
+// "1.2.3.4, <their real IP>" by the time it reaches us. Earlier elements are
+// attacker-controlled and must never be used as the key.
 func clientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		if ip := strings.TrimSpace(parts[len(parts)-1]); ip != "" {
+			return ip
+		}
+	}
 	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 		return host
 	}

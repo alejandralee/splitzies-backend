@@ -1,9 +1,9 @@
 package transport
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -13,10 +13,37 @@ import (
 	"splitzies/storage"
 )
 
+// maxReceiptsPerDevice caps how many bills one device can keep in its history.
+//
+// The cap is on the live history, not on receipts ever created, so deleting a
+// bill frees a slot — which is what the client tells the user.
+const maxReceiptsPerDevice = 5
+
 // UploadReceiptImageHandler handles POST /receipts/image
 func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	rid := requestID(r)
+
+	// A device token is required here, not optional. This is the one endpoint
+	// that spends money per call, and the per-device cap below is only a cap
+	// if a caller can't opt out of it by dropping the header.
+	deviceID, ok := t.requireDevice(w, r)
+	if !ok {
+		return
+	}
+
+	count, err := t.persistenceClient.CountReceiptsForDevice(ctx, deviceID)
+	if err != nil {
+		t.log.Error("failed to count device receipts", "request_id", rid, "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "db_error", "failed to check your bill history", rid)
+		return
+	}
+	if count >= maxReceiptsPerDevice {
+		t.log.Info("receipt limit reached", "request_id", rid, "device_id", deviceID, "count", count)
+		writeJSONError(w, http.StatusConflict, "receipt_limit_reached",
+			fmt.Sprintf("you can keep up to %d bills — delete one to scan another", maxReceiptsPerDevice), rid)
+		return
+	}
 
 	file, contentType, err := t.validateReceiptImageRequest(w, r)
 	if err != nil {
@@ -31,33 +58,27 @@ func (t *Transport) UploadReceiptImageHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	uploadCtx, cancel := context.WithTimeout(ctx, gcsUploadTimeout)
-	imageURL, err := t.gcsClient.UploadReceiptImageFromReader(uploadCtx, bytes.NewReader(fileData), persistence.GenerateReceiptID(), contentType)
-	cancel()
-	if err != nil {
-		t.log.Error("failed to upload receipt image", "request_id", rid, "error", err)
-		writeJSONError(w, http.StatusInternalServerError, "receipt_image_upload_failed", "failed to upload receipt image", rid)
-		return
-	}
-
-	ocr := t.parseReceipt(ctx, rid, fileData, contentType)
-	if ocr == nil || len(ocr.items) == 0 {
-		t.log.Error("no receipt items extracted, not persisting receipt", "request_id", rid, "image_url", imageURL)
+	// The image is read in memory and never persisted. Nothing in the product
+	// ever showed the photo back, so storing it only built up a pile of other
+	// people's receipts — merchant, date, line items, often a card's last four
+	// — with no use for it. The parsed items are what the app needs.
+	parsed := t.parseReceipt(ctx, rid, fileData, contentType)
+	if parsed == nil || len(parsed.items) == 0 {
+		t.log.Error("no receipt items extracted, not persisting receipt", "request_id", rid)
 		writeJSONError(w, http.StatusUnprocessableEntity, "receipt_parse_failed", "failed to extract any items from receipt image", rid)
 		return
 	}
 
-	// When the uploader has a device token, the receipt lands in their history.
-	savedReceipt, err := t.persistenceClient.SaveReceipt(ctx, ocr.items, &imageURL, ocr.ocrTextData, ocr.currency, ocr.receiptDate, ocr.title, ocr.tax, ocr.tip, deviceIDFromContext(ctx))
+	savedReceipt, err := t.persistenceClient.SaveReceipt(ctx, parsed.items, nil, parsed.ocrTextData, parsed.currency, parsed.receiptDate, parsed.title, parsed.tax, parsed.tip, &deviceID)
 	if err != nil {
-		t.log.Error("failed to save receipt", "request_id", rid, "image_url", imageURL, "error", err)
+		t.log.Error("failed to save receipt", "request_id", rid, "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "receipt_save_failed", "failed to save receipt", rid)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	if err := json.NewEncoder(w).Encode(buildUploadReceiptResponse(savedReceipt, imageURL, ocr.ocrTextData, ocr.currency, ocr.tax, ocr.tip)); err != nil {
+	if err := json.NewEncoder(w).Encode(buildUploadReceiptResponse(savedReceipt, parsed.ocrTextData, parsed.currency, parsed.tax, parsed.tip)); err != nil {
 		t.log.Error("failed to encode upload receipt response", "request_id", rid, "error", err)
 	}
 }
@@ -76,7 +97,6 @@ type ocrParseResult struct {
 // Timeouts bound every external call in the parse pipeline so a slow or hung
 // upstream can't tie up a request indefinitely.
 const (
-	gcsUploadTimeout   = 15 * time.Second
 	visionTimeout      = 15 * time.Second
 	geminiTextTimeout  = 20 * time.Second
 	geminiImageTimeout = 30 * time.Second
@@ -225,7 +245,7 @@ func (t *Transport) validateReceiptImageRequest(w http.ResponseWriter, r *http.R
 	return file, ct, nil
 }
 
-func buildUploadReceiptResponse(savedReceipt *persistence.Receipt, imageURL string, ocrTextData *persistence.OCRTextData, currency *string, tax, tip *float64) UploadReceiptResponse {
+func buildUploadReceiptResponse(savedReceipt *persistence.Receipt, ocrTextData *persistence.OCRTextData, currency *string, tax, tip *float64) UploadReceiptResponse {
 	responseItems := make([]ReceiptItem, len(savedReceipt.Items))
 	for i, item := range savedReceipt.Items {
 		responseItems[i] = ReceiptItem{
@@ -240,7 +260,6 @@ func buildUploadReceiptResponse(savedReceipt *persistence.Receipt, imageURL stri
 
 	response := UploadReceiptResponse{
 		ReceiptID: savedReceipt.ID,
-		ImageURL:  imageURL,
 		Items:     responseItems,
 	}
 	if ocrTextData != nil {

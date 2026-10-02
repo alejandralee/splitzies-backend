@@ -1,7 +1,21 @@
 openapi: 3.0.3
 info:
   title: Splitzies API
-  description: API for splitting receipts and assigning items to users
+  description: |
+    API for splitting receipts and assigning items to users.
+
+    **Access model.** There are no accounts. `POST /devices` mints an anonymous
+    device token, sent as `X-Device-Token`. Reading a bill needs only its ID,
+    which is how a share link works. *Changing* a bill additionally requires
+    that the calling device be on it — granted by uploading the receipt or by
+    opening a live share link — so every mutating endpoint can answer `403
+    not_a_participant`, and revoking a share link genuinely withdraws access.
+
+    **Receipt photos are not stored.** The uploaded image is parsed in memory
+    and discarded; only the extracted line items and receipt text are kept.
+
+    **One device may keep 5 bills.** `POST /receipts/image` answers `409
+    receipt_limit_reached` beyond that; deleting a bill frees a slot.
   version: 1.0.0
   contact:
     name: Splitzies
@@ -91,20 +105,55 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+    delete:
+      summary: Delete this device's entire bill history
+      description: |
+        Empties this device's history. Every bill no other device is holding is
+        deleted outright, along with its items, participants, assignments,
+        share link and stored receipt text. Bills someone else still has are
+        only removed from this device's history — a shared bill is not any one
+        person's to destroy.
+
+        The device identity itself is kept, so the app keeps working afterwards
+        with nothing left attached to it.
+      operationId: deleteAllMyReceipts
+      parameters:
+        - $ref: '#/components/parameters/device_token'
+      responses:
+        '200':
+          description: History deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeleteAllReceiptsResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
   /me/receipts/{receipt_id}:
     delete:
-      summary: Remove a bill from this device's history
+      summary: Delete a bill from this device's history
       description: |
-        Hides the bill from this device only. The receipt itself and the other
-        participants' history are untouched — a shared bill is not any one
-        person's to delete.
+        Removes the bill from this device's history and, when no other device
+        is holding it, deletes the bill and everything on it outright. A bill
+        someone else still has stays theirs — a shared bill is not any one
+        person's to destroy.
       operationId: deleteMyReceipt
       parameters:
         - $ref: '#/components/parameters/receipt_id'
         - $ref: '#/components/parameters/device_token'
       responses:
         '200':
-          description: Removed from history
+          description: Deleted, or removed from this device's history
           content:
             application/json:
               schema:
@@ -155,6 +204,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The calling device is not a participant on this bill
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
           content:
@@ -179,6 +240,18 @@ paths:
                 $ref: '#/components/schemas/MessageResponse'
         '404':
           description: The receipt has no active share link
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The calling device is not a participant on this bill
           content:
             application/json:
               schema:
@@ -274,6 +347,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The calling device is not a participant on this bill
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
           content:
@@ -285,9 +364,16 @@ paths:
     post:
       summary: Upload receipt image
       description: |
-        Upload a receipt image for OCR processing. The image is stored in GCS,
-        OCR is performed to extract text, and items are parsed using Gemini.
-        Returns the receipt ID, image URL, and parsed items.
+        Upload a receipt image to be parsed into items.
+
+        The image is read in memory and **never stored** — it is sent to Gemini
+        to be read, and discarded when the request ends. Only the parsed items
+        and extracted receipt text are persisted.
+
+        Requires a device token: the bill lands in that device's history, and
+        the per-device limit of 5 bills is enforced here. This endpoint is the
+        one that costs money per call and is rate limited more tightly than the
+        rest of the API.
       operationId: uploadReceiptImage
       requestBody:
         required: true
@@ -311,6 +397,18 @@ paths:
                 $ref: '#/components/schemas/UploadReceiptResponse'
         '400':
           description: Invalid request (missing image, unsupported file type, file too large)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: This device already holds the maximum of 5 bills (receipt_limit_reached)
           content:
             application/json:
               schema:
@@ -414,6 +512,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The calling device is not a participant on this bill
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
           content:
@@ -497,6 +607,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The calling device is not a participant on this bill
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
           content:
@@ -528,6 +644,18 @@ paths:
                 $ref: '#/components/schemas/MessageResponse'
         '404':
           description: Participant not found on this receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The calling device is not a participant on this bill
           content:
             application/json:
               schema:
@@ -599,6 +727,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The calling device is not a participant on this bill
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
           content:
@@ -630,6 +770,18 @@ paths:
                 $ref: '#/components/schemas/MessageResponse'
         '404':
           description: Item not found on this receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The calling device is not a participant on this bill
           content:
             application/json:
               schema:
@@ -681,6 +833,18 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The calling device is not a participant on this bill
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
         '500':
           description: Internal server error
           content:
@@ -725,6 +889,18 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: User or item not found, or they belong to different receipts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Missing or unknown X-Device-Token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: The calling device is not a participant on this bill
           content:
             application/json:
               schema:
@@ -832,10 +1008,6 @@ components:
           type: string
           description: Receipt ID — use this for all subsequent calls
           example: "01J8K2M3N4P5Q6R7S8T9V0W1X2"
-        image_url:
-          type: string
-          format: uri
-          description: GCS URL of the uploaded image
         items:
           type: array
           items:
@@ -1141,10 +1313,6 @@ components:
         title:
           type: string
           nullable: true
-        image_url:
-          type: string
-          format: uri
-          nullable: true
         receipt_date:
           type: string
           format: date-time
@@ -1180,6 +1348,17 @@ components:
           description: |
             What this device's claimed participant owes. Absent when the device
             has not claimed anyone on the bill.
+
+    DeleteAllReceiptsResponse:
+      type: object
+      properties:
+        message:
+          type: string
+          example: history deleted
+        receipts_deleted:
+          type: integer
+          description: How many bills left this device's history
+          example: 3
 
     ListMyReceiptsResponse:
       type: object

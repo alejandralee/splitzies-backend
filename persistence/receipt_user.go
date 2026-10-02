@@ -404,3 +404,19 @@ func (c *Client) GetUserItems(ctx context.Context, receiptUserID string) ([]Rece
 	}
 	return items, nil
 }
+
+// ReceiptUserExists reports whether a participant belongs to a given receipt.
+// The assignment endpoints use it to pin a request to the receipt in its own
+// URL, so a participant ID from some other bill can't be operated on through
+// a receipt the caller does happen to be a member of.
+func (c *Client) ReceiptUserExists(ctx context.Context, receiptID, userID string) (bool, error) {
+	var exists bool
+	err := c.db.QueryRow(ctx,
+		"SELECT EXISTS(SELECT 1 FROM receipt_users WHERE id = $1 AND receipt_id = $2)",
+		userID, receiptID,
+	).Scan(&exists)
+	if err != nil {
+		return false, fmt.Errorf("failed to verify receipt participant: %w", err)
+	}
+	return exists, nil
+}

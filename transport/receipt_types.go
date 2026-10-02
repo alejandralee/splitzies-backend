@@ -36,7 +36,6 @@ type AddReceiptResponse struct {
 // UploadReceiptResponse represents the response for receipt image upload
 type UploadReceiptResponse struct {
 	ReceiptID string        `json:"receipt_id"`
-	ImageURL  string        `json:"image_url"`
 	Items     []ReceiptItem `json:"items"`
 	OCRText   *string       `json:"ocr_text,omitempty"`
 	Tax       *money.Amount `json:"tax,omitempty"`
@@ -146,6 +145,14 @@ type CreateDeviceResponse struct {
 	DeviceToken string `json:"device_token"`
 }
 
+// DeleteAllReceiptsResponse is returned by DELETE /me/receipts. The count is
+// how many bills left this device's history, which is what the client reports
+// back to the user.
+type DeleteAllReceiptsResponse struct {
+	Message         string `json:"message"`
+	ReceiptsDeleted int    `json:"receipts_deleted"`
+}
+
 // ShareLinkResponse is returned by POST /receipts/{id}/share. URL is what the
 // client renders as a QR code and offers as "copy link".
 type ShareLinkResponse struct {
@@ -169,7 +176,6 @@ type JoinShareLinkResponse struct {
 type ReceiptSummary struct {
 	ReceiptID        string        `json:"receipt_id"`
 	Title            *string       `json:"title,omitempty"`
-	ImageURL         *string       `json:"image_url,omitempty"`
 	ReceiptDate      *time.Time    `json:"receipt_date,omitempty"`
 	CreatedAt        time.Time     `json:"created_at"`
 	UpdatedAt        time.Time     `json:"updated_at"`

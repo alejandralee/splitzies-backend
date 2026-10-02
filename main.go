@@ -39,12 +39,6 @@ func main() {
 		log.Fatalf("failed to run migrations: %v", err)
 	}
 
-	gcsClient, err := storage.NewGCSClient(ctx)
-	if err != nil {
-		log.Fatalf("failed to create GCS client: %v", err)
-	}
-	defer gcsClient.Close()
-
 	visionClient, err := storage.NewVisionClient(ctx)
 	if err != nil {
 		log.Fatalf("failed to create Vision client: %v", err)
@@ -63,7 +57,7 @@ func main() {
 	// Cloud Vision OCR -> Gemini text pipeline. GEMINI_MODEL overrides the
 	// model. Both take effect on restart, with no deploy.
 	receiptParseMode := os.Getenv("RECEIPT_PARSE_MODE")
-	t := tr.NewTransport(logger, db, gcsClient, visionClient, geminiClient, receiptParseMode)
+	t := tr.NewTransport(logger, db, visionClient, geminiClient, receiptParseMode)
 	logger.Info("receipt parsing configured", "mode", t.ReceiptParseMode(), "model", geminiClient.Model())
 
 	mux := http.NewServeMux()
@@ -74,6 +68,7 @@ func main() {
 	// Anonymous device identity — the basis for history without an account.
 	mux.HandleFunc("POST /devices", t.CreateDeviceHandler)
 	mux.HandleFunc("GET /me/receipts", t.ListMyReceiptsHandler)
+	mux.HandleFunc("DELETE /me/receipts", t.DeleteAllMyReceiptsHandler)
 	mux.HandleFunc("DELETE /me/receipts/{receipt_id}", t.DeleteMyReceiptHandler)
 
 	// Receipt image upload — tightly rate limited, since each call pays for a

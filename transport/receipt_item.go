@@ -16,6 +16,10 @@ import (
 // this single unit.
 func (t *Transport) CreateReceiptItemHandler(w http.ResponseWriter, r *http.Request) {
 	receiptID := r.PathValue("receipt_id")
+
+	if _, ok := t.requireReceiptMember(w, r, receiptID); !ok {
+		return
+	}
 	ctx := r.Context()
 
 	var req CreateReceiptItemRequest
@@ -86,6 +90,10 @@ func (t *Transport) PatchReceiptItemGroupHandler(w http.ResponseWriter, r *http.
 	receiptID := r.PathValue("receipt_id")
 	groupID := r.PathValue("group_id")
 
+	if _, ok := t.requireReceiptMember(w, r, receiptID); !ok {
+		return
+	}
+
 	var req PatchReceiptItemGroupRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "invalid_body", "failed to parse request body", "")
@@ -118,6 +126,10 @@ func (t *Transport) PatchReceiptItemGroupHandler(w http.ResponseWriter, r *http.
 func (t *Transport) DeleteReceiptItemHandler(w http.ResponseWriter, r *http.Request) {
 	receiptID := r.PathValue("receipt_id")
 	itemID := r.PathValue("item_id")
+
+	if _, ok := t.requireReceiptMember(w, r, receiptID); !ok {
+		return
+	}
 
 	if err := t.persistenceClient.DeleteReceiptItem(r.Context(), receiptID, itemID); err != nil {
 		t.log.Error("failed to delete receipt item", "receipt_id", receiptID, "item_id", itemID, "error", err)

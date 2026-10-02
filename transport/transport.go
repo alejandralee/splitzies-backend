@@ -21,7 +21,6 @@ const (
 type Transport struct {
 	log               *slog.Logger
 	persistenceClient *persistence.Client
-	gcsClient         *storage.GCSClient
 	visionClient      *storage.VisionClient
 	geminiClient      *storage.GeminiClient
 	receiptParseMode  string
@@ -30,7 +29,6 @@ type Transport struct {
 func NewTransport(
 	log *slog.Logger,
 	persistenceClient *persistence.Client,
-	gcsClient *storage.GCSClient,
 	visionClient *storage.VisionClient,
 	geminiClient *storage.GeminiClient,
 	receiptParseMode string,
@@ -42,7 +40,6 @@ func NewTransport(
 	return &Transport{
 		log:               log,
 		persistenceClient: persistenceClient,
-		gcsClient:         gcsClient,
 		visionClient:      visionClient,
 		geminiClient:      geminiClient,
 		receiptParseMode:  receiptParseMode,
