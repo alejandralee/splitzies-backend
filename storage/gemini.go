@@ -110,6 +110,7 @@ const receiptRules = `Rules:
 - If quantity is missing, use 1.
 - If total_price or price_per_item is missing, set it to null. Never invent a price.
 - Convert the name into a human-readable format (e.g., "Coca-Cola" instead of "COLA").
+- Output one entry per printed line; do not combine lines. When the same item is printed on several lines, give every one of those lines the identical name.
 - title is the restaurant or store the receipt is from.
 - If currency is not explicit, infer it from context (e.g., "USD" for US receipts). Null if unknown.
 - receipt_date: ISO 8601 (YYYY-MM-DD) preferred. Null if not present.
